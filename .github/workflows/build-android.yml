@@ -102,9 +102,14 @@ jobs:
       - name: Collect APK
         run: |
           mkdir -p dist
-          apk=$(find source/wie-app/gen/android/app/build/outputs/apk -type f -name '*.apk' -print -quit)
+          apk=$(find source/wie-app/gen/android/app/build/outputs/apk -type f -name '*-release.apk' -print -quit)
           test -n "$apk"
           cp "$apk" dist/wie-dragonlord-aarch64.apk
+
+      - name: Verify APK signature
+        run: |
+          build_tools=$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)
+          "$build_tools/apksigner" verify --verbose --print-certs dist/wie-dragonlord-aarch64.apk
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
