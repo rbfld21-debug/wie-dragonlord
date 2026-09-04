@@ -1,0 +1,87 @@
+name: Build Dragonlord Android APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out build files
+        uses: actions/checkout@v4
+
+      - name: Check out WIE source
+        run: git clone --depth 1 https://github.com/dlunch/wie.git source
+
+      - name: Apply Dragonlord compatibility patch
+        run: git -C source apply "$GITHUB_WORKSPACE/patches/MC_grpGetContext-WIE.patch"
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown,aarch64-linux-android
+
+      - name: Test MC_grpGetContext
+        working-directory: source
+        run: cargo test -p wie-wipi-c get_context_returns_scalar_and_composite_values
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: source/package-lock.json
+
+      - name: Install wasm-pack and Tauri CLI
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack,tauri-cli
+
+      - name: Build web frontend
+        working-directory: source
+        run: |
+          npm ci
+          npm run build:prod
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Select Android NDK
+        run: |
+          ndk_home=${ANDROID_NDK_LATEST_HOME:-$(find "$ANDROID_HOME/ndk" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)}
+          echo "ANDROID_NDK_HOME=$ndk_home" >> "$GITHUB_ENV"
+          echo "NDK_HOME=$ndk_home" >> "$GITHUB_ENV"
+
+      - name: Initialize Android project
+        working-directory: source/wie-app
+        run: cargo tauri android init --ci
+
+      - name: Generate Android icons
+        working-directory: source/wie-app
+        run: cargo tauri icon ../wie-web/src/assets/favicon.png
+
+      - name: Build debug APK
+        working-directory: source/wie-app
+        run: cargo tauri android build --debug --target aarch64 --apk --ci --config '{"build":{"beforeBuildCommand":""}}'
+
+      - name: Collect APK
+        run: |
+          mkdir -p dist
+          apk=$(find source/wie-app/gen/android/app/build/outputs/apk -type f -name '*.apk' -print -quit)
+          test -n "$apk"
+          cp "$apk" dist/wie-dragonlord-aarch64.apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: wie-dragonlord-android
+          path: dist/wie-dragonlord-aarch64.apk
+          if-no-files-found: error
