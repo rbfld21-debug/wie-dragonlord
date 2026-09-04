@@ -1,7 +1,25 @@
 diff --git a/wie-ktf/src/runtime/wipi_c/method_table.rs b/wie-ktf/src/runtime/wipi_c/method_table.rs
-index 520a532..0860b78 100644
+index 520a532..9c51439 100644
 --- a/wie-ktf/src/runtime/wipi_c/method_table.rs
 +++ b/wie-ktf/src/runtime/wipi_c/method_table.rs
+@@ -9,7 +9,7 @@ use wie_core_arm::ArmCore;
+ use wie_util::{Result, WieError};
+ use wie_wipi_c::{
+     MethodImpl, WIPICContext, WIPICMethodBody,
+-    api::{database, graphics, kernel, media, misc, net, uic, util},
++    api::{database, graphics, kernel, media, misc, net, qtc_database, uic, util},
+ };
+
+ use crate::runtime::{
+@@ -282,7 +282,7 @@ pub fn get_media_method_table() -> Vec<WIPICMethodBody> {
+         gen_stub(12, "MC_mdaUnk12"),
+         gen_stub(13, "MC_mdaUnk13"),
+         media::get_volume.into_body(),
+-        gen_stub(15, "MC_mdaUnk15"),
++        media::set_volume.into_body(),
+         media::vibrator.into_body(),
+         media::unk17.into_body(),
+         media::unk18.into_body(),
 @@ -438,7 +438,7 @@ pub fn get_method_body(table_id: WIPICTableId, function_id: u16) -> Option<WIPIC
              WIPICGraphicsMethodId::CreateOffscreenFramebuffer => Some(graphics::create_offscreen_framebuffer.into_body()),
              WIPICGraphicsMethodId::InitContext => Some(graphics::init_context.into_body()),
@@ -11,14 +29,87 @@ index 520a532..0860b78 100644
              WIPICGraphicsMethodId::PutPixel => Some(graphics::put_pixel.into_body()),
              WIPICGraphicsMethodId::DrawLine => Some(graphics::draw_line.into_body()),
              WIPICGraphicsMethodId::DrawRect => Some(graphics::draw_rect.into_body()),
+@@ -493,13 +493,15 @@ pub fn get_method_body(table_id: WIPICTableId, function_id: u16) -> Option<WIPIC
+             WIPICGraphicsMethodId::GetImageInfo => Some(gen_stub(59, "OEMC_grpGetImageInfo")),
+         },
+         WIPICTableId::Interface3 => get_unk3_method_table().into_iter().nth(function_id as usize),
+-        WIPICTableId::Interface4 => {
+-            if function_id < 64 {
+-                Some(gen_stub(4, "stub"))
+-            } else {
+-                None
+-            }
+-        }
++        WIPICTableId::Interface4 => match function_id {
++            0 => Some(qtc_database::open.into_body()),
++            1 => Some(qtc_database::close.into_body()),
++            3 => Some(qtc_database::add.into_body()),
++            4 => Some(qtc_database::find.into_body()),
++            5 => Some(qtc_database::get.into_body()),
++            2 | 6..64 => Some(gen_stub(4, "stub")),
++            _ => None,
++        },
+         WIPICTableId::Interface5 => {
+             if function_id < 64 {
+                 Some(gen_stub(5, "stub"))
+diff --git a/wie-wipi-c/src/api.rs b/wie-wipi-c/src/api.rs
+index 3898c17..e22bfe3 100644
+--- a/wie-wipi-c/src/api.rs
++++ b/wie-wipi-c/src/api.rs
+@@ -4,5 +4,6 @@ pub mod kernel;
+ pub mod media;
+ pub mod misc;
+ pub mod net;
++pub mod qtc_database;
+ pub mod uic;
+ pub mod util;
+diff --git a/wie-wipi-c/src/api/database.rs b/wie-wipi-c/src/api/database.rs
+index 9663380..a7f5361 100644
+--- a/wie-wipi-c/src/api/database.rs
++++ b/wie-wipi-c/src/api/database.rs
+@@ -578,9 +578,10 @@ pub async fn exists_database_ktf(context: &mut dyn WIPICContext, name_ptr: WIPIC
+         }
+     };
+
++    let packaged = read_packaged_database(context, &name).await?.is_some();
+     let system = context.system();
+     let pid = system.pid().to_owned();
+-    let exists = system.platform().database_repository().exists(&name, &pid).await;
++    let exists = packaged || system.platform().database_repository().exists(&name, &pid).await;
+
+     let result = if exists { 1 } else { 0 };
+     tracing::debug!("MC_dbExists({name:?}) -> {result}");
+@@ -621,11 +622,19 @@ async fn get_database_from_db_id(context: &mut dyn WIPICContext, db_id: i32) ->
+ }
+
+ async fn read_packaged_database(context: &mut dyn WIPICContext, name: &str) -> Result<Option<Vec<u8>>> {
+-    if context.get_resource_size(name).await?.is_none() {
+-        return Ok(None);
++    if context.get_resource_size(name).await?.is_some() {
++        return Ok(Some(context.read_resource(name).await?));
+     }
+
+-    Ok(Some(context.read_resource(name).await?))
++    let Some(size) = context.system().filesystem().size(name).await else {
++        return Ok(None);
++    };
++    let mut data = vec![0; size];
++    let Some(read) = context.system().filesystem().read(name, 0, size, &mut data).await else {
++        return Ok(None);
++    };
++    data.truncate(read);
++    Ok(Some(data))
+ }
+
+ #[cfg(test)]
 diff --git a/wie-wipi-c/src/api/graphics.rs b/wie-wipi-c/src/api/graphics.rs
-index 3023956..fa54d24 100644
+index 7dcc33c..1a382b8 100644
 --- a/wie-wipi-c/src/api/graphics.rs
 +++ b/wie-wipi-c/src/api/graphics.rs
-@@ -100,6 +100,62 @@ pub async fn set_context(context: &mut dyn WIPICContext, p_grp_ctx: WIPICWord, o
+@@ -100,6 +100,29 @@ pub async fn set_context(context: &mut dyn WIPICContext, p_grp_ctx: WIPICWord, o
      Ok(())
  }
- 
+
 +pub async fn get_context(context: &mut dyn WIPICContext, p_grp_ctx: WIPICWord, op: WIPICGraphicsContextIdx, pv: WIPICWord) -> Result<()> {
 +    tracing::debug!("MC_grpGetContext({p_grp_ctx:#x}, {op:?}, {pv:#x})");
 +
@@ -41,6 +132,14 @@ index 3023956..fa54d24 100644
 +
 +    Ok(())
 +}
++
+ pub async fn put_pixel(context: &mut dyn WIPICContext, dst_fb: WIPICIndirectPtr, x: i32, y: i32, p_gctx: WIPICWord) -> Result<()> {
+     tracing::debug!("MC_grpPutPixel({:#x}, {x}, {y}, {p_gctx:?})", dst_fb.0);
+
+@@ -647,3 +670,36 @@ pub async fn get_framebuffer_bpp(context: &mut dyn WIPICContext, framebuffer: WI
+
+     Ok(framebuffer.bpp as _)
+ }
 +
 +#[cfg(test)]
 +mod context_tests {
@@ -74,10 +173,6 @@ index 3023956..fa54d24 100644
 +        Ok(())
 +    }
 +}
-+
- pub async fn put_pixel(context: &mut dyn WIPICContext, dst_fb: WIPICIndirectPtr, x: i32, y: i32, p_gctx: WIPICWord) -> Result<()> {
-     tracing::debug!("MC_grpPutPixel({:#x}, {x}, {y}, {p_gctx:?})", dst_fb.0);
- 
 diff --git a/wie-wipi-c/src/api/kernel.rs b/wie-wipi-c/src/api/kernel.rs
 index b5fde9c..220068d 100644
 --- a/wie-wipi-c/src/api/kernel.rs
@@ -85,19 +180,251 @@ index b5fde9c..220068d 100644
 @@ -255,13 +255,16 @@ pub async fn sprintk(
  pub async fn get_total_memory(_context: &mut dyn WIPICContext) -> Result<i32> {
      tracing::warn!("stub MC_knlGetTotalMemory()");
- 
+
 -    Ok(0x100000) // TODO hardcoded
 +    // KTF titles use this value as a startup capability check. The emulated
 +    // ARM heap is much larger than the old 1 MiB placeholder, which caused
 +    // otherwise compatible games to display a false out-of-memory warning.
 +    Ok(0x1000000)
  }
- 
+
  pub async fn get_free_memory(_context: &mut dyn WIPICContext) -> Result<i32> {
      tracing::warn!("stub MC_knlGetFreeMemory()");
- 
+
 -    Ok(0x100000) // TODO hardcoded
 +    Ok(0x1000000)
  }
- 
+
  pub async fn exit(context: &mut dyn WIPICContext, code: i32) -> Result<()> {
+diff --git a/wie-wipi-c/src/api/media.rs b/wie-wipi-c/src/api/media.rs
+index 2989cbf..6410370 100644
+--- a/wie-wipi-c/src/api/media.rs
++++ b/wie-wipi-c/src/api/media.rs
+@@ -177,6 +177,11 @@ pub async fn get_volume(_context: &mut dyn WIPICContext) -> Result<WIPICWord> {
+     Ok(0)
+ }
+
++pub async fn set_volume(_context: &mut dyn WIPICContext, volume: WIPICWord, max_volume: WIPICWord, source: WIPICWord) -> Result<WIPICWord> {
++    tracing::warn!("stub MC_mdaSetVolume({volume}, {max_volume}, {source})");
++    Ok(0)
++}
++
+ pub async fn play(context: &mut dyn WIPICContext, ptr_clip: WIPICWord, repeat: WIPICWord) -> Result<i32> {
+     tracing::debug!("MC_mdaPlay({ptr_clip:#x}, {repeat})");
+
+diff --git a/wie-wipi-c/src/api/qtc_database.rs b/wie-wipi-c/src/api/qtc_database.rs
+new file mode 100644
+index 0000000..bc25242
+--- /dev/null
++++ b/wie-wipi-c/src/api/qtc_database.rs
+@@ -0,0 +1,209 @@
++use alloc::{format, string::String, vec, vec::Vec};
++use core::mem::size_of;
++
++use bytemuck::{Pod, Zeroable};
++use wie_util::{Result, read_generic, read_null_terminated_string_bytes, write_generic};
++use wipi_types::wipic::WIPICWord;
++
++use crate::WIPICContext;
++
++const HANDLE_MAGIC: u32 = 0x5154_4344; // "QTCD"
++const HEADER_SIZE: usize = 45;
++
++#[derive(Clone, Copy, Pod, Zeroable)]
++#[repr(C)]
++struct Handle {
++    magic: u32,
++    record_size: u32,
++    record_count: u32,
++    records_ptr: u32,
++    records_capacity: u32,
++    cursor: u32,
++}
++
++/// KTF's fixed-record database used by older native titles. Packaged files
++/// carry the `qtcdb` header and are addressed without the `.db` suffix.
++pub async fn open(context: &mut dyn WIPICContext, name_ptr: WIPICWord, record_size: u32, create: u32, _kind: u32) -> Result<i32> {
++    let Ok(name) = String::from_utf8(read_null_terminated_string_bytes(context, name_ptr)?) else {
++        return Ok(-22);
++    };
++    if record_size == 0 {
++        return Ok(-22);
++    }
++
++    let path = format!("{name}.db");
++    let bytes = read_file(context, &path).await;
++    if bytes.is_none() && create == 0 {
++        return Ok(-12);
++    }
++
++    let mut records = Vec::new();
++    if let Some(bytes) = bytes
++        && bytes.len() >= HEADER_SIZE
++        && &bytes[..5] == b"qtcdb"
++    {
++        let stored_size = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
++        if stored_size == record_size as usize {
++            let mut cursor = HEADER_SIZE;
++            while cursor + 1 + stored_size <= bytes.len() {
++                if bytes[cursor] != 0 {
++                    records.extend_from_slice(&bytes[cursor + 1..cursor + 1 + stored_size]);
++                }
++                cursor += 1 + stored_size;
++            }
++        }
++    }
++
++    let capacity = records.len().max(record_size as usize * 4) as u32;
++    let records_ptr = context.alloc_raw(capacity)?;
++    if !records.is_empty() {
++        context.write_bytes(records_ptr, &records)?;
++    }
++    let handle = Handle {
++        magic: HANDLE_MAGIC,
++        record_size,
++        record_count: records.len() as u32 / record_size,
++        records_ptr,
++        records_capacity: capacity,
++        cursor: 0,
++    };
++    let handle_ptr = context.alloc_raw(size_of::<Handle>() as u32)?;
++    write_generic(context, handle_ptr, handle)?;
++    tracing::debug!(
++        "qtcdb.open({name:?}, record_size={record_size}, create={create}) -> {handle_ptr:#x}, records={}",
++        handle.record_count
++    );
++    Ok(handle_ptr as i32)
++}
++
++pub async fn close(context: &mut dyn WIPICContext, handle_ptr: i32) -> Result<i32> {
++    let Some(handle) = load_handle(context, handle_ptr)? else {
++        return Ok(-25);
++    };
++    context.free_raw(handle.records_ptr, handle.records_capacity)?;
++    context.free_raw(handle_ptr as u32, size_of::<Handle>() as u32)?;
++    tracing::debug!("qtcdb.close({handle_ptr:#x})");
++    Ok(0)
++}
++
++pub async fn add(context: &mut dyn WIPICContext, handle_ptr: i32, data_ptr: WIPICWord, length: u32) -> Result<i32> {
++    let Some(mut handle) = load_handle(context, handle_ptr)? else {
++        return Ok(-25);
++    };
++    if length != handle.record_size {
++        return Ok(-22);
++    }
++    let end = (handle.record_count + 1)
++        .checked_mul(handle.record_size)
++        .ok_or(wie_util::WieError::InvalidMemoryAccess(0))?;
++    if end > handle.records_capacity {
++        let new_capacity = end.max(handle.records_capacity.saturating_mul(2));
++        let new_ptr = context.alloc_raw(new_capacity)?;
++        let mut old = vec![0; (handle.record_count * handle.record_size) as usize];
++        context.read_bytes(handle.records_ptr, &mut old)?;
++        context.write_bytes(new_ptr, &old)?;
++        context.free_raw(handle.records_ptr, handle.records_capacity)?;
++        handle.records_ptr = new_ptr;
++        handle.records_capacity = new_capacity;
++    }
++    let mut data = vec![0; length as usize];
++    context.read_bytes(data_ptr, &mut data)?;
++    context.write_bytes(handle.records_ptr + handle.record_count * handle.record_size, &data)?;
++    handle.record_count += 1;
++    write_generic(context, handle_ptr as u32, handle)?;
++    tracing::debug!("qtcdb.add({handle_ptr:#x}, {data_ptr:#x}, {length}) -> {}", handle.record_count - 1);
++    Ok((handle.record_count - 1) as i32)
++}
++
++pub async fn find(context: &mut dyn WIPICContext, handle_ptr: i32, index: i32, out_ptr: WIPICWord, length: u32) -> Result<i32> {
++    let Some(mut handle) = load_handle(context, handle_ptr)? else {
++        return Ok(-25);
++    };
++    if length != handle.record_size {
++        return Ok(-22);
++    }
++    if handle.record_count == 0 {
++        return Ok(-22);
++    }
++    let index = if index < 0 { 0 } else { index as u32 };
++    if index >= handle.record_count {
++        return Ok(-22);
++    }
++    let mut data = vec![0; handle.record_size as usize];
++    context.read_bytes(handle.records_ptr + index * handle.record_size, &mut data)?;
++    context.write_bytes(out_ptr, &data)?;
++    handle.cursor = index + 1;
++    write_generic(context, handle_ptr as u32, handle)?;
++    tracing::debug!("qtcdb.find({handle_ptr:#x}, index={index}, out={out_ptr:#x}, {length}) -> 0");
++    Ok(0)
++}
++
++pub async fn get(context: &mut dyn WIPICContext, handle_ptr: i32, index: i32, out_ptr: WIPICWord, length: u32) -> Result<i32> {
++    let Some(mut handle) = load_handle(context, handle_ptr)? else {
++        return Ok(-25);
++    };
++    let index = if index < 0 { handle.cursor } else { index as u32 };
++    tracing::debug!("qtcdb.get({handle_ptr:#x}, index={index}, out={out_ptr:#x}, {length})");
++    if index >= handle.record_count || length < handle.record_size {
++        return Ok(-22);
++    }
++    let mut data = vec![0; handle.record_size as usize];
++    context.read_bytes(handle.records_ptr + index * handle.record_size, &mut data)?;
++    context.write_bytes(out_ptr, &data)?;
++    handle.cursor = index + 1;
++    write_generic(context, handle_ptr as u32, handle)?;
++    Ok(0)
++}
++
++fn load_handle(context: &mut dyn WIPICContext, ptr: i32) -> Result<Option<Handle>> {
++    if ptr < 0x10000 {
++        return Ok(None);
++    }
++    let handle: Handle = read_generic(context, ptr as u32)?;
++    Ok((handle.magic == HANDLE_MAGIC).then_some(handle))
++}
++
++async fn read_file(context: &mut dyn WIPICContext, path: &str) -> Option<Vec<u8>> {
++    let size = context.system().filesystem().size(path).await?;
++    let mut bytes = vec![0; size];
++    let read = context.system().filesystem().read(path, 0, size, &mut bytes).await?;
++    bytes.truncate(read);
++    Some(bytes)
++}
++
++#[cfg(test)]
++mod tests {
++    use alloc::{boxed::Box, vec};
++
++    use test_utils::TestPlatform;
++    use wie_backend::{DefaultTaskRunner, System};
++    use wie_util::{ByteRead, ByteWrite};
++
++    use crate::context::test::TestContext;
++
++    use super::{close, find, get, open};
++
++    #[futures_test::test]
++    async fn reads_packaged_fixed_records_in_order() {
++        let system = System::new(Box::new(TestPlatform::new()), "test-pid", "test-aid", DefaultTaskRunner);
++        let mut file = vec![0; 45];
++        file[..5].copy_from_slice(b"qtcdb");
++        file[8..12].copy_from_slice(&4u32.to_le_bytes());
++        file.extend_from_slice(&[1, 1, 2, 3, 4, 1, 5, 6, 7, 8]);
++        system.filesystem().add_virtual("records.db", file);
++
++        let mut context = TestContext::with_system(system);
++        context.write_bytes(0x1000, b"records\0").unwrap();
++        let handle = open(&mut context, 0x1000, 4, 0, 1).await.unwrap();
++
++        assert_eq!(find(&mut context, handle, -1, 0x2000, 4).await.unwrap(), 0);
++        assert_eq!(get(&mut context, handle, -1, 0x2010, 4).await.unwrap(), 0);
++        let mut first = [0; 4];
++        let mut second = [0; 4];
++        context.read_bytes(0x2000, &mut first).unwrap();
++        context.read_bytes(0x2010, &mut second).unwrap();
++        assert_eq!(first, [1, 2, 3, 4]);
++        assert_eq!(second, [5, 6, 7, 8]);
++        assert_eq!(close(&mut context, handle).await.unwrap(), 0);
++    }
++}
+
