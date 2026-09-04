@@ -70,9 +70,34 @@ jobs:
         working-directory: source/wie-app
         run: cargo tauri icon ../wie-web/src/assets/favicon.png
 
-      - name: Build debug APK
+      - name: Create Android signing key
+        run: |
+          keytool -genkeypair -v \
+            -keystore "$RUNNER_TEMP/dragonlord.jks" \
+            -storepass android -keypass android -alias dragonlord \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=WIE Dragonlord, OU=Personal Build, O=WIE, L=Jeonju, C=KR"
+          echo "ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/dragonlord.jks" >> "$GITHUB_ENV"
+          cat >> source/wie-app/gen/android/app/build.gradle.kts <<'EOF'
+
+          android {
+              signingConfigs {
+                  create("release") {
+                      storeFile = file(System.getenv("ANDROID_KEYSTORE_PATH"))
+                      storePassword = "android"
+                      keyAlias = "dragonlord"
+                      keyPassword = "android"
+                  }
+              }
+              buildTypes.getByName("release") {
+                  signingConfig = signingConfigs.getByName("release")
+              }
+          }
+          EOF
+
+      - name: Build signed release APK
         working-directory: source/wie-app
-        run: cargo tauri android build --debug --target aarch64 --apk --ci --config '{"build":{"beforeBuildCommand":""}}'
+        run: cargo tauri android build --target aarch64 --apk --ci --config '{"build":{"beforeBuildCommand":""}}'
 
       - name: Collect APK
         run: |
