@@ -28,9 +28,9 @@ jobs:
         with:
           targets: wasm32-unknown-unknown,aarch64-linux-android
 
-      - name: Test MC_grpGetContext
+      - name: Test compatibility layer
         working-directory: source
-        run: cargo test -p wie-wipi-c get_context_returns_scalar_and_composite_values
+        run: cargo test -p wie-wipi-c
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -117,3 +117,4 @@ jobs:
           name: wie-dragonlord-android
           path: dist/wie-dragonlord-aarch64.apk
           if-no-files-found: error
+
