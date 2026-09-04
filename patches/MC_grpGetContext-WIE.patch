@@ -1,5 +1,5 @@
 diff --git a/wie-ktf/src/runtime/wipi_c/method_table.rs b/wie-ktf/src/runtime/wipi_c/method_table.rs
-index 520a532..9c51439 100644
+index 520a532..391eb5a 100644
 --- a/wie-ktf/src/runtime/wipi_c/method_table.rs
 +++ b/wie-ktf/src/runtime/wipi_c/method_table.rs
 @@ -9,7 +9,7 @@ use wie_core_arm::ArmCore;
@@ -20,6 +20,15 @@ index 520a532..9c51439 100644
          media::vibrator.into_body(),
          media::unk17.into_body(),
          media::unk18.into_body(),
+@@ -313,7 +313,7 @@ pub fn get_net_method_table() -> Vec<WIPICMethodBody> {
+         gen_stub(11, "MC_netGetHostAddr"),
+         gen_stub(12, "MC_netSocketAccept"),
+         gen_stub(13, "MC_netSetReadCB"),
+-        gen_stub(14, "MC_netSetWriteCB"),
++        net::set_write_callback.into_body(),
+         gen_stub(15, "MC_netHttpOpen"),
+         gen_stub(16, "MC_netHttpConnect"),
+         gen_stub(17, "MC_netHttpSetRequestMethod"),
 @@ -438,7 +438,7 @@ pub fn get_method_body(table_id: WIPICTableId, function_id: u16) -> Option<WIPIC
              WIPICGraphicsMethodId::CreateOffscreenFramebuffer => Some(graphics::create_offscreen_framebuffer.into_body()),
              WIPICGraphicsMethodId::InitContext => Some(graphics::init_context.into_body()),
@@ -212,6 +221,22 @@ index 2989cbf..6410370 100644
  pub async fn play(context: &mut dyn WIPICContext, ptr_clip: WIPICWord, repeat: WIPICWord) -> Result<i32> {
      tracing::debug!("MC_mdaPlay({ptr_clip:#x}, {repeat})");
 
+diff --git a/wie-wipi-c/src/api/net.rs b/wie-wipi-c/src/api/net.rs
+index 17d4376..106502e 100644
+--- a/wie-wipi-c/src/api/net.rs
++++ b/wie-wipi-c/src/api/net.rs
+@@ -42,3 +42,11 @@ pub async fn socket_close(_context: &mut dyn WIPICContext, fd: i32) -> Result<i3
+
+     Ok(-1) // M_E_ERROR
+ }
++
++/// Registering a write-ready callback is optional for the emulator's
++/// currently unsupported socket backend. Accept the registration so legacy
++/// applications can continue through their shared event-dispatch path.
++pub async fn set_write_callback(_context: &mut dyn WIPICContext, fd: i32, callback: WIPICWord, param: WIPICWord) -> Result<i32> {
++    tracing::warn!("stub MC_netSetWriteCB({fd}, {callback:#x}, {param:#x})");
++    Ok(0)
++}
 diff --git a/wie-wipi-c/src/api/qtc_database.rs b/wie-wipi-c/src/api/qtc_database.rs
 new file mode 100644
 index 0000000..bc25242
@@ -427,4 +452,3 @@ index 0000000..bc25242
 +        assert_eq!(close(&mut context, handle).await.unwrap(), 0);
 +    }
 +}
-
