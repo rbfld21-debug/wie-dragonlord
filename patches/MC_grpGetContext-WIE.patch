@@ -1,0 +1,81 @@
+diff --git a/wie-ktf/src/runtime/wipi_c/method_table.rs b/wie-ktf/src/runtime/wipi_c/method_table.rs
+index 520a532..0860b78 100644
+--- a/wie-ktf/src/runtime/wipi_c/method_table.rs
++++ b/wie-ktf/src/runtime/wipi_c/method_table.rs
+@@ -438,7 +438,7 @@ pub fn get_method_body(table_id: WIPICTableId, function_id: u16) -> Option<WIPIC
+             WIPICGraphicsMethodId::CreateOffscreenFramebuffer => Some(graphics::create_offscreen_framebuffer.into_body()),
+             WIPICGraphicsMethodId::InitContext => Some(graphics::init_context.into_body()),
+             WIPICGraphicsMethodId::SetContext => Some(graphics::set_context.into_body()),
+-            WIPICGraphicsMethodId::GetContext => Some(gen_stub(7, "MC_grpGetContext")),
++            WIPICGraphicsMethodId::GetContext => Some(graphics::get_context.into_body()),
+             WIPICGraphicsMethodId::PutPixel => Some(graphics::put_pixel.into_body()),
+             WIPICGraphicsMethodId::DrawLine => Some(graphics::draw_line.into_body()),
+             WIPICGraphicsMethodId::DrawRect => Some(graphics::draw_rect.into_body()),
+diff --git a/wie-wipi-c/src/api/graphics.rs b/wie-wipi-c/src/api/graphics.rs
+index 3023956..fa54d24 100644
+--- a/wie-wipi-c/src/api/graphics.rs
++++ b/wie-wipi-c/src/api/graphics.rs
+@@ -100,6 +100,62 @@ pub async fn set_context(context: &mut dyn WIPICContext, p_grp_ctx: WIPICWord, o
+     Ok(())
+ }
+ 
++pub async fn get_context(context: &mut dyn WIPICContext, p_grp_ctx: WIPICWord, op: WIPICGraphicsContextIdx, pv: WIPICWord) -> Result<()> {
++    tracing::debug!("MC_grpGetContext({p_grp_ctx:#x}, {op:?}, {pv:#x})");
++
++    let grp_ctx: WIPICGraphicsContext = read_generic(context, p_grp_ctx)?;
++    match op {
++        WIPICGraphicsContextIdx::ClipIdx => write_generic(context, pv, grp_ctx.clip)?,
++        WIPICGraphicsContextIdx::FgPixelIdx => write_generic(context, pv, grp_ctx.fgpxl)?,
++        WIPICGraphicsContextIdx::BgPixelIdx => write_generic(context, pv, grp_ctx.bgpxl)?,
++        WIPICGraphicsContextIdx::TransPixelIdx => write_generic(context, pv, grp_ctx.transpxl)?,
++        WIPICGraphicsContextIdx::AlphaIdx => write_generic(context, pv, grp_ctx.alpha)?,
++        WIPICGraphicsContextIdx::PixelopIdx => write_generic(context, pv, grp_ctx.pixel_op_func_ptr)?,
++        WIPICGraphicsContextIdx::PixelParam1Idx => write_generic(context, pv, grp_ctx.param1)?,
++        WIPICGraphicsContextIdx::FontIdx => write_generic(context, pv, grp_ctx.font)?,
++        WIPICGraphicsContextIdx::StyleIdx => write_generic(context, pv, grp_ctx.style)?,
++        WIPICGraphicsContextIdx::OffsetIdx => write_generic(context, pv, grp_ctx.offset)?,
++        _ => {
++            tracing::warn!("MC_grpGetContext({p_grp_ctx:#x}, {op:?}, {pv:#x}): ignoring invalid op");
++        }
++    }
++
++    Ok(())
++}
++
++#[cfg(test)]
++mod context_tests {
++    use wie_util::{Result, read_generic, write_generic};
++
++    use crate::{WIPICContext, context::test::TestContext};
++
++    use super::{WIPICGraphicsContextIdx, get_context, init_context, set_context};
++
++    #[futures_test::test]
++    async fn get_context_returns_scalar_and_composite_values() -> Result<()> {
++        let mut context = TestContext::new();
++        let graphics_context = context.alloc_raw(64)?;
++        let input = context.alloc_raw(16)?;
++        let output = context.alloc_raw(16)?;
++
++        init_context(&mut context, graphics_context).await?;
++
++        set_context(&mut context, graphics_context, WIPICGraphicsContextIdx::FgPixelIdx, 0x1234_5678).await?;
++        get_context(&mut context, graphics_context, WIPICGraphicsContextIdx::FgPixelIdx, output).await?;
++        let foreground: u32 = read_generic(&context, output)?;
++        assert_eq!(foreground, 0x1234_5678);
++
++        let clip = [1_u16, 2, 30, 40];
++        write_generic(&mut context, input, clip)?;
++        set_context(&mut context, graphics_context, WIPICGraphicsContextIdx::ClipIdx, input).await?;
++        get_context(&mut context, graphics_context, WIPICGraphicsContextIdx::ClipIdx, output).await?;
++        let output_clip: [u16; 4] = read_generic(&context, output)?;
++        assert_eq!(output_clip, clip);
++
++        Ok(())
++    }
++}
++
+ pub async fn put_pixel(context: &mut dyn WIPICContext, dst_fb: WIPICIndirectPtr, x: i32, y: i32, p_gctx: WIPICWord) -> Result<()> {
+     tracing::debug!("MC_grpPutPixel({:#x}, {x}, {y}, {p_gctx:?})", dst_fb.0);
+ 
+
