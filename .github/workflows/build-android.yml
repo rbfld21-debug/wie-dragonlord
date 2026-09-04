@@ -3,7 +3,7 @@ name: Build Dragonlord Android APK
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches: [main, codex/mc-grp-get-context]
 
 permissions:
   contents: read
