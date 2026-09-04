@@ -78,4 +78,26 @@ index 3023956..fa54d24 100644
  pub async fn put_pixel(context: &mut dyn WIPICContext, dst_fb: WIPICIndirectPtr, x: i32, y: i32, p_gctx: WIPICWord) -> Result<()> {
      tracing::debug!("MC_grpPutPixel({:#x}, {x}, {y}, {p_gctx:?})", dst_fb.0);
  
-
+diff --git a/wie-wipi-c/src/api/kernel.rs b/wie-wipi-c/src/api/kernel.rs
+index b5fde9c..220068d 100644
+--- a/wie-wipi-c/src/api/kernel.rs
++++ b/wie-wipi-c/src/api/kernel.rs
+@@ -255,13 +255,16 @@ pub async fn sprintk(
+ pub async fn get_total_memory(_context: &mut dyn WIPICContext) -> Result<i32> {
+     tracing::warn!("stub MC_knlGetTotalMemory()");
+ 
+-    Ok(0x100000) // TODO hardcoded
++    // KTF titles use this value as a startup capability check. The emulated
++    // ARM heap is much larger than the old 1 MiB placeholder, which caused
++    // otherwise compatible games to display a false out-of-memory warning.
++    Ok(0x1000000)
+ }
+ 
+ pub async fn get_free_memory(_context: &mut dyn WIPICContext) -> Result<i32> {
+     tracing::warn!("stub MC_knlGetFreeMemory()");
+ 
+-    Ok(0x100000) // TODO hardcoded
++    Ok(0x1000000)
+ }
+ 
+ pub async fn exit(context: &mut dyn WIPICContext, code: i32) -> Result<()> {
