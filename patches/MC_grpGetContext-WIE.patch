@@ -1,5 +1,5 @@
 diff --git a/wie-ktf/src/runtime/wipi_c/method_table.rs b/wie-ktf/src/runtime/wipi_c/method_table.rs
-index 520a532..a6480af 100644
+index 520a532..6fc0e28 100644
 --- a/wie-ktf/src/runtime/wipi_c/method_table.rs
 +++ b/wie-ktf/src/runtime/wipi_c/method_table.rs
 @@ -9,7 +9,7 @@ use wie_core_arm::ArmCore;
@@ -9,7 +9,7 @@ index 520a532..a6480af 100644
 -    api::{database, graphics, kernel, media, misc, net, uic, util},
 +    api::{database, graphics, kernel, media, misc, net, qtc_database, uic, util},
  };
-
+ 
  use crate::runtime::{
 @@ -282,7 +282,7 @@ pub fn get_media_method_table() -> Vec<WIPICMethodBody> {
          gen_stub(12, "MC_mdaUnk12"),
@@ -20,6 +20,15 @@ index 520a532..a6480af 100644
          media::vibrator.into_body(),
          media::unk17.into_body(),
          media::unk18.into_body(),
+@@ -298,7 +298,7 @@ pub fn get_media_method_table() -> Vec<WIPICMethodBody> {
+ }
+ 
+ pub fn get_net_method_table() -> Vec<WIPICMethodBody> {
+-    vec![
++    let mut methods = vec![
+         net::connect.into_body(),
+         net::close.into_body(),
+         gen_stub(2, "MC_netSocket"),
 @@ -312,8 +312,8 @@ pub fn get_net_method_table() -> Vec<WIPICMethodBody> {
          gen_stub(10, "MC_netSocketRcvFrom"),
          gen_stub(11, "MC_netGetHostAddr"),
@@ -31,7 +40,22 @@ index 520a532..a6480af 100644
          gen_stub(15, "MC_netHttpOpen"),
          gen_stub(16, "MC_netHttpConnect"),
          gen_stub(17, "MC_netHttpSetRequestMethod"),
-@@ -438,7 +438,7 @@ pub fn get_method_body(table_id: WIPICTableId, function_id: u16) -> Option<WIPIC
+@@ -329,7 +329,13 @@ pub fn get_net_method_table() -> Vec<WIPICMethodBody> {
+         gen_stub(27, "MC_netHttpGetType"),
+         gen_stub(28, "MC_netHttpGetEncoding"),
+         gen_stub(29, "MC_netHttpClose"),
+-    ]
++    ];
++
++    // Some KTF handsets expose carrier-specific network extensions after the
++    // standard WIPI network methods. Keep those table slots addressable even
++    // when their optional operations are unavailable.
++    methods.extend((30..64).map(|index| gen_unk_stub(WIPICTableId::Net as u32, index)));
++    methods
+ }
+ 
+ fn gen_unk_stub(id: u32, index: u32) -> WIPICMethodBody {
+@@ -438,7 +444,7 @@ pub fn get_method_body(table_id: WIPICTableId, function_id: u16) -> Option<WIPIC
              WIPICGraphicsMethodId::CreateOffscreenFramebuffer => Some(graphics::create_offscreen_framebuffer.into_body()),
              WIPICGraphicsMethodId::InitContext => Some(graphics::init_context.into_body()),
              WIPICGraphicsMethodId::SetContext => Some(graphics::set_context.into_body()),
@@ -40,7 +64,7 @@ index 520a532..a6480af 100644
              WIPICGraphicsMethodId::PutPixel => Some(graphics::put_pixel.into_body()),
              WIPICGraphicsMethodId::DrawLine => Some(graphics::draw_line.into_body()),
              WIPICGraphicsMethodId::DrawRect => Some(graphics::draw_rect.into_body()),
-@@ -493,13 +493,15 @@ pub fn get_method_body(table_id: WIPICTableId, function_id: u16) -> Option<WIPIC
+@@ -493,13 +499,15 @@ pub fn get_method_body(table_id: WIPICTableId, function_id: u16) -> Option<WIPIC
              WIPICGraphicsMethodId::GetImageInfo => Some(gen_stub(59, "OEMC_grpGetImageInfo")),
          },
          WIPICTableId::Interface3 => get_unk3_method_table().into_iter().nth(function_id as usize),
@@ -63,6 +87,21 @@ index 520a532..a6480af 100644
          WIPICTableId::Interface5 => {
              if function_id < 64 {
                  Some(gen_stub(5, "stub"))
+@@ -574,3 +582,14 @@ pub fn get_method_body(table_id: WIPICTableId, function_id: u16) -> Option<WIPIC
+         }
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn net_method_table_reserves_carrier_extension_slots() {
++        assert_eq!(get_net_method_table().len(), 64);
++        assert!(get_method_body(WIPICTableId::Net, 34).is_some());
++    }
++}
 diff --git a/wie-wipi-c/src/api.rs b/wie-wipi-c/src/api.rs
 index 3898c17..e22bfe3 100644
 --- a/wie-wipi-c/src/api.rs
@@ -81,25 +120,25 @@ index 9663380..a7f5361 100644
 @@ -578,9 +578,10 @@ pub async fn exists_database_ktf(context: &mut dyn WIPICContext, name_ptr: WIPIC
          }
      };
-
+ 
 +    let packaged = read_packaged_database(context, &name).await?.is_some();
      let system = context.system();
      let pid = system.pid().to_owned();
 -    let exists = system.platform().database_repository().exists(&name, &pid).await;
 +    let exists = packaged || system.platform().database_repository().exists(&name, &pid).await;
-
+ 
      let result = if exists { 1 } else { 0 };
      tracing::debug!("MC_dbExists({name:?}) -> {result}");
 @@ -621,11 +622,19 @@ async fn get_database_from_db_id(context: &mut dyn WIPICContext, db_id: i32) ->
  }
-
+ 
  async fn read_packaged_database(context: &mut dyn WIPICContext, name: &str) -> Result<Option<Vec<u8>>> {
 -    if context.get_resource_size(name).await?.is_none() {
 -        return Ok(None);
 +    if context.get_resource_size(name).await?.is_some() {
 +        return Ok(Some(context.read_resource(name).await?));
      }
-
+ 
 -    Ok(Some(context.read_resource(name).await?))
 +    let Some(size) = context.system().filesystem().size(name).await else {
 +        return Ok(None);
@@ -111,7 +150,7 @@ index 9663380..a7f5361 100644
 +    data.truncate(read);
 +    Ok(Some(data))
  }
-
+ 
  #[cfg(test)]
 diff --git a/wie-wipi-c/src/api/graphics.rs b/wie-wipi-c/src/api/graphics.rs
 index 7dcc33c..1a382b8 100644
@@ -120,7 +159,7 @@ index 7dcc33c..1a382b8 100644
 @@ -100,6 +100,29 @@ pub async fn set_context(context: &mut dyn WIPICContext, p_grp_ctx: WIPICWord, o
      Ok(())
  }
-
+ 
 +pub async fn get_context(context: &mut dyn WIPICContext, p_grp_ctx: WIPICWord, op: WIPICGraphicsContextIdx, pv: WIPICWord) -> Result<()> {
 +    tracing::debug!("MC_grpGetContext({p_grp_ctx:#x}, {op:?}, {pv:#x})");
 +
@@ -146,9 +185,9 @@ index 7dcc33c..1a382b8 100644
 +
  pub async fn put_pixel(context: &mut dyn WIPICContext, dst_fb: WIPICIndirectPtr, x: i32, y: i32, p_gctx: WIPICWord) -> Result<()> {
      tracing::debug!("MC_grpPutPixel({:#x}, {x}, {y}, {p_gctx:?})", dst_fb.0);
-
+ 
 @@ -647,3 +670,36 @@ pub async fn get_framebuffer_bpp(context: &mut dyn WIPICContext, framebuffer: WI
-
+ 
      Ok(framebuffer.bpp as _)
  }
 +
@@ -191,21 +230,21 @@ index b5fde9c..220068d 100644
 @@ -255,13 +255,16 @@ pub async fn sprintk(
  pub async fn get_total_memory(_context: &mut dyn WIPICContext) -> Result<i32> {
      tracing::warn!("stub MC_knlGetTotalMemory()");
-
+ 
 -    Ok(0x100000) // TODO hardcoded
 +    // KTF titles use this value as a startup capability check. The emulated
 +    // ARM heap is much larger than the old 1 MiB placeholder, which caused
 +    // otherwise compatible games to display a false out-of-memory warning.
 +    Ok(0x1000000)
  }
-
+ 
  pub async fn get_free_memory(_context: &mut dyn WIPICContext) -> Result<i32> {
      tracing::warn!("stub MC_knlGetFreeMemory()");
-
+ 
 -    Ok(0x100000) // TODO hardcoded
 +    Ok(0x1000000)
  }
-
+ 
  pub async fn exit(context: &mut dyn WIPICContext, code: i32) -> Result<()> {
 diff --git a/wie-wipi-c/src/api/media.rs b/wie-wipi-c/src/api/media.rs
 index 2989cbf..6410370 100644
@@ -214,7 +253,7 @@ index 2989cbf..6410370 100644
 @@ -177,6 +177,11 @@ pub async fn get_volume(_context: &mut dyn WIPICContext) -> Result<WIPICWord> {
      Ok(0)
  }
-
+ 
 +pub async fn set_volume(_context: &mut dyn WIPICContext, volume: WIPICWord, max_volume: WIPICWord, source: WIPICWord) -> Result<WIPICWord> {
 +    tracing::warn!("stub MC_mdaSetVolume({volume}, {max_volume}, {source})");
 +    Ok(0)
@@ -222,24 +261,27 @@ index 2989cbf..6410370 100644
 +
  pub async fn play(context: &mut dyn WIPICContext, ptr_clip: WIPICWord, repeat: WIPICWord) -> Result<i32> {
      tracing::debug!("MC_mdaPlay({ptr_clip:#x}, {repeat})");
-
+ 
 diff --git a/wie-wipi-c/src/api/net.rs b/wie-wipi-c/src/api/net.rs
-index 17d4376..4485d3f 100644
+index 17d4376..175d74b 100644
 --- a/wie-wipi-c/src/api/net.rs
 +++ b/wie-wipi-c/src/api/net.rs
-@@ -42,3 +42,13 @@ pub async fn socket_close(_context: &mut dyn WIPICContext, fd: i32) -> Result<i3
-
+@@ -42,3 +42,16 @@ pub async fn socket_close(_context: &mut dyn WIPICContext, fd: i32) -> Result<i3
+ 
      Ok(-1) // M_E_ERROR
  }
 +
++/// Registering a write-ready callback is optional for the emulator's
++/// currently unsupported socket backend. Accept the registration so legacy
++/// applications can continue through their shared event-dispatch path.
 +pub async fn set_write_callback(_context: &mut dyn WIPICContext, fd: i32, callback: WIPICWord, param: WIPICWord) -> Result<i32> {
 +    tracing::warn!("stub MC_netSetWriteCB({fd}, {callback:#x}, {param:#x})");
-+    Ok(-1)
++    Ok(0)
 +}
 +
 +pub async fn set_read_callback(_context: &mut dyn WIPICContext, fd: i32, callback: WIPICWord, param: WIPICWord) -> Result<i32> {
 +    tracing::warn!("stub MC_netSetReadCB({fd}, {callback:#x}, {param:#x})");
-+    Ok(-1)
++    Ok(0)
 +}
 diff --git a/wie-wipi-c/src/api/qtc_database.rs b/wie-wipi-c/src/api/qtc_database.rs
 new file mode 100644
