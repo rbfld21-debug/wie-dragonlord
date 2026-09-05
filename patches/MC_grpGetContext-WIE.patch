@@ -1,3 +1,26 @@
+diff --git a/wie-core-arm/data/binary_patches.toml b/wie-core-arm/data/binary_patches.toml
+index ddd2fae..a707e39 100644
+--- a/wie-core-arm/data/binary_patches.toml
++++ b/wie-core-arm/data/binary_patches.toml
+@@ -50,6 +50,18 @@
+ # patches/hooks is fatal (likely a stale entry against an updated binary);
+ # generic (hash-less) entries warn and continue.
+ 
++[[entry]]
++name = "Dragonlord offline startup"
++hash = "ab2164985fc4fbafc0c7d15c9d902aa2"
++
++# The original updater calls a discontinued KTF content server before starting
++# the bundled game. Start the game from the packaged resources, mark the
++# updater complete, and preserve the function epilogue.
++[[entry.patch]]
++pc = 0x1136d6
++expect = "e8 68 00 28 03 d1 20 1c 08 bc 9a 46 f0 bd 28 f0 80 f8 f8 e7"
++bytes = "68 68 00 21 fd f7 05 fe 07 23 ab 64 20 46 08 bc 9a 46 f0 bd"
++
+ [[entry]]
+ name = "Generic compiler library / inline copy patterns"
+ 
 diff --git a/wie-ktf/src/runtime/wipi_c/method_table.rs b/wie-ktf/src/runtime/wipi_c/method_table.rs
 index 520a532..6fc0e28 100644
 --- a/wie-ktf/src/runtime/wipi_c/method_table.rs
