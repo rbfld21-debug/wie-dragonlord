@@ -224,49 +224,22 @@ index 2989cbf..6410370 100644
      tracing::debug!("MC_mdaPlay({ptr_clip:#x}, {repeat})");
 
 diff --git a/wie-wipi-c/src/api/net.rs b/wie-wipi-c/src/api/net.rs
-index 17d4376..11765d1 100644
+index 17d4376..4485d3f 100644
 --- a/wie-wipi-c/src/api/net.rs
 +++ b/wie-wipi-c/src/api/net.rs
-@@ -42,3 +42,40 @@ pub async fn socket_close(_context: &mut dyn WIPICContext, fd: i32) -> Result<i3
+@@ -42,3 +42,13 @@ pub async fn socket_close(_context: &mut dyn WIPICContext, fd: i32) -> Result<i3
 
      Ok(-1) // M_E_ERROR
  }
 +
-+struct SocketCallback {
-+    fd: i32,
-+    callback: WIPICWord,
-+    param: WIPICWord,
-+}
-+
-+#[async_trait::async_trait]
-+impl MethodBody<WieError> for SocketCallback {
-+    #[tracing::instrument(name = "socket_callback", skip_all)]
-+    async fn call(&self, context: &mut dyn WIPICContext, _: Box<[WIPICWord]>) -> Result<WIPICResult> {
-+        context.system().sleep(1).await;
-+        context.call_function(self.callback, &[self.fd as WIPICWord, u32::MAX, self.param]).await?;
-+
-+        Ok(WIPICResult { results: Vec::new() })
-+    }
-+}
-+
-+fn spawn_socket_callback(context: &mut dyn WIPICContext, fd: i32, callback: WIPICWord, param: WIPICWord) -> Result<()> {
-+    if callback == 0 {
-+        return Ok(());
-+    }
-+
-+    context.spawn(Box::new(SocketCallback { fd, callback, param }))
-+}
-+
-+pub async fn set_write_callback(context: &mut dyn WIPICContext, fd: i32, callback: WIPICWord, param: WIPICWord) -> Result<i32> {
++pub async fn set_write_callback(_context: &mut dyn WIPICContext, fd: i32, callback: WIPICWord, param: WIPICWord) -> Result<i32> {
 +    tracing::warn!("stub MC_netSetWriteCB({fd}, {callback:#x}, {param:#x})");
-+    spawn_socket_callback(context, fd, callback, param)?;
-+    Ok(0)
++    Ok(-1)
 +}
 +
-+pub async fn set_read_callback(context: &mut dyn WIPICContext, fd: i32, callback: WIPICWord, param: WIPICWord) -> Result<i32> {
++pub async fn set_read_callback(_context: &mut dyn WIPICContext, fd: i32, callback: WIPICWord, param: WIPICWord) -> Result<i32> {
 +    tracing::warn!("stub MC_netSetReadCB({fd}, {callback:#x}, {param:#x})");
-+    spawn_socket_callback(context, fd, callback, param)?;
-+    Ok(0)
++    Ok(-1)
 +}
 diff --git a/wie-wipi-c/src/api/qtc_database.rs b/wie-wipi-c/src/api/qtc_database.rs
 new file mode 100644
