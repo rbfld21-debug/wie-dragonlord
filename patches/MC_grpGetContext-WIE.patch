@@ -224,10 +224,10 @@ index 2989cbf..6410370 100644
      tracing::debug!("MC_mdaPlay({ptr_clip:#x}, {repeat})");
 
 diff --git a/wie-wipi-c/src/api/net.rs b/wie-wipi-c/src/api/net.rs
-index 17d4376..dea8ea1 100644
+index 17d4376..11765d1 100644
 --- a/wie-wipi-c/src/api/net.rs
 +++ b/wie-wipi-c/src/api/net.rs
-@@ -42,3 +42,36 @@ pub async fn socket_close(_context: &mut dyn WIPICContext, fd: i32) -> Result<i3
+@@ -42,3 +42,40 @@ pub async fn socket_close(_context: &mut dyn WIPICContext, fd: i32) -> Result<i3
 
      Ok(-1) // M_E_ERROR
  }
@@ -250,6 +250,10 @@ index 17d4376..dea8ea1 100644
 +}
 +
 +fn spawn_socket_callback(context: &mut dyn WIPICContext, fd: i32, callback: WIPICWord, param: WIPICWord) -> Result<()> {
++    if callback == 0 {
++        return Ok(());
++    }
++
 +    context.spawn(Box::new(SocketCallback { fd, callback, param }))
 +}
 +
