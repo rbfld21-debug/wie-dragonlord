@@ -1,0 +1,120 @@
+name: Build Dragonlord Android APK
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main, codex/mc-grp-get-context]
+
+permissions:
+  contents: read
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out build files
+        uses: actions/checkout@v4
+
+      - name: Check out WIE source
+        run: git clone --depth 1 https://github.com/dlunch/wie.git source
+
+      - name: Apply Dragonlord compatibility patch
+        run: git -C source apply "$GITHUB_WORKSPACE/patches/MC_grpGetContext-WIE.patch"
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown,aarch64-linux-android
+
+      - name: Test compatibility layer
+        working-directory: source
+        run: cargo test -p wie-wipi-c
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: source/package-lock.json
+
+      - name: Install wasm-pack and Tauri CLI
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack,tauri-cli
+
+      - name: Build web frontend
+        working-directory: source
+        run: |
+          npm ci
+          npm run build:prod
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Select Android NDK
+        run: |
+          ndk_home=${ANDROID_NDK_LATEST_HOME:-$(find "$ANDROID_HOME/ndk" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)}
+          echo "ANDROID_NDK_HOME=$ndk_home" >> "$GITHUB_ENV"
+          echo "NDK_HOME=$ndk_home" >> "$GITHUB_ENV"
+
+      - name: Initialize Android project
+        working-directory: source/wie-app
+        run: cargo tauri android init --ci
+
+      - name: Generate Android icons
+        working-directory: source/wie-app
+        run: cargo tauri icon ../wie-web/src/assets/favicon.png
+
+      - name: Create Android signing key
+        run: |
+          keytool -genkeypair -v \
+            -keystore "$RUNNER_TEMP/dragonlord.jks" \
+            -storepass android -keypass android -alias dragonlord \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=WIE Dragonlord, OU=Personal Build, O=WIE, L=Jeonju, C=KR"
+          echo "ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/dragonlord.jks" >> "$GITHUB_ENV"
+          cat >> source/wie-app/gen/android/app/build.gradle.kts <<'EOF'
+
+          android {
+              signingConfigs {
+                  create("release") {
+                      storeFile = file(System.getenv("ANDROID_KEYSTORE_PATH"))
+                      storePassword = "android"
+                      keyAlias = "dragonlord"
+                      keyPassword = "android"
+                  }
+              }
+              buildTypes.getByName("release") {
+                  signingConfig = signingConfigs.getByName("release")
+              }
+          }
+          EOF
+
+      - name: Build signed release APK
+        working-directory: source/wie-app
+        run: cargo tauri android build --target aarch64 --apk --ci --config '{"build":{"beforeBuildCommand":""}}'
+
+      - name: Collect APK
+        run: |
+          mkdir -p dist
+          apk=$(find source/wie-app/gen/android/app/build/outputs/apk -type f -name '*-release.apk' -print -quit)
+          test -n "$apk"
+          cp "$apk" dist/wie-dragonlord-aarch64.apk
+
+      - name: Verify APK signature
+        run: |
+          build_tools=$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)
+          "$build_tools/apksigner" verify --verbose --print-certs dist/wie-dragonlord-aarch64.apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: wie-dragonlord-android
+          path: dist/wie-dragonlord-aarch64.apk
+          if-no-files-found: error
+
