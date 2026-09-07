@@ -132,112 +132,20 @@ index 520a5322..6fc0e28a 100644
 +        assert!(get_method_body(WIPICTableId::Net, 34).is_some());
 +    }
 +}
-diff --git a/wie-web/Cargo.toml b/wie-web/Cargo.toml
-index 9cf706fe..7ccf049e 100644
---- a/wie-web/Cargo.toml
-+++ b/wie-web/Cargo.toml
-@@ -30,7 +30,7 @@ tracing-subscriber = { version = "^0.3", features = ["time"] }
- tracing-web = { version = "^0.1" }
- wasm-bindgen = { version = "^0.2" }
- wasm-bindgen-futures = { version = "^0.4" }
--web-sys = { version = "^0.3", features = ["HtmlCanvasElement", "CanvasRenderingContext2d", "ImageData", "Window", "Navigator"] }
-+web-sys = { version = "^0.3", features = ["HtmlCanvasElement", "CanvasRenderingContext2d", "ImageData", "Window", "Event", "Navigator"] }
- 
- wie-backend = { workspace = true }
- wie-ktf = { workspace = true }
 diff --git a/wie-web/src/rust/lib.rs b/wie-web/src/rust/lib.rs
-index f43e78d0..5bf831c2 100644
+index f43e78d0..25c4680e 100644
 --- a/wie-web/src/rust/lib.rs
 +++ b/wie-web/src/rust/lib.rs
-@@ -129,7 +129,17 @@ impl Platform for WieWebPlatform {
+@@ -129,6 +129,9 @@ impl Platform for WieWebPlatform {
          tracing::info!("{}", string);
      }
  
--    fn exit(&self) {}
-+    fn exit(&self) {
-+        // A handset relaunches an installed WIPI application after its updater
-+        // exits. Ask the frontend to recreate only the emulator instance. A
-+        // full location reload can terminate an Android WebView/Tauri activity
-+        // while this call is still unwinding.
-+        if let Some(window) = web_sys::window() {
-+            if let Ok(event) = web_sys::Event::new("wie-app-restart") {
-+                let _ = window.dispatch_event(&event);
-+            }
-+        }
-+    }
++    // Legacy updaters call MC_knlExit after committing their completion state.
++    // The Android host must remain alive; deliberately ignore that handset
++    // process-exit request and let the application event path unwind normally.
+     fn exit(&self) {}
  
      fn vibrate(&self, duration_ms: u64, intensity: u8) {
-         if duration_ms == 0 || intensity == 0 {
-diff --git a/wie-web/src/ts/app.ts b/wie-web/src/ts/app.ts
-index 74f18065..01ba12ee 100644
---- a/wie-web/src/ts/app.ts
-+++ b/wie-web/src/ts/app.ts
-@@ -32,7 +32,14 @@ const icons = {
-   Settings,
- };
- 
--export const runApp = (app: AppMetadata, archive: Uint8Array, fontData: Uint8Array, settings: SettingsController, exit: (error?: unknown) => void) => {
-+export const runApp = (
-+  app: AppMetadata,
-+  archive: Uint8Array,
-+  fontData: Uint8Array,
-+  settings: SettingsController,
-+  exit: (error?: unknown) => void,
-+  restart: () => void,
-+) => {
-   const playerView = document.getElementById("player-view") as HTMLElement;
-   const playerTitle = document.getElementById("player-title") as HTMLElement;
-   const canvas = document.getElementById("canvas") as HTMLCanvasElement;
-@@ -50,6 +57,18 @@ export const runApp = (app: AppMetadata, archive: Uint8Array, fontData: Uint8Arr
- 
-   backToLibrary.addEventListener("click", () => exit(), { signal: abortController.signal });
-   appSettings.addEventListener("click", settings.open, { signal: abortController.signal });
-+  window.addEventListener(
-+    "wie-app-restart",
-+    () => {
-+      if (!running) {
-+        return;
-+      }
-+      running = false;
-+      // Do not free the WASM emulator from inside MC_knlExit's call stack.
-+      queueMicrotask(restart);
-+    },
-+    { signal: abortController.signal },
-+  );
- 
-   for (const button of document.querySelectorAll<HTMLButtonElement>("button[data-key]")) {
-     const key = button.dataset.key!;
-diff --git a/wie-web/src/ts/index.ts b/wie-web/src/ts/index.ts
-index 781e4916..bbbf220d 100644
---- a/wie-web/src/ts/index.ts
-+++ b/wie-web/src/ts/index.ts
-@@ -18,7 +18,7 @@ const main = async () => {
-       libraryView.hidden = true;
-       playerView.hidden = false;
- 
--      let disposeApp: () => void;
-+      let disposeApp = () => {};
-       const routeToLibrary = (error?: unknown) => {
-         disposeApp();
-         playerView.hidden = true;
-@@ -31,8 +31,16 @@ const main = async () => {
-         }
-       };
- 
-+      function startApp() {
-+        disposeApp = runApp(app, archive, fontData, settings, routeToLibrary, restartApp);
-+      }
-+      function restartApp() {
-+        disposeApp();
-+        requestAnimationFrame(startApp);
-+      }
-+
-       try {
--        disposeApp = runApp(app, archive, fontData, settings, routeToLibrary);
-+        startApp();
-       } catch (error) {
-         playerView.hidden = true;
-         libraryView.hidden = false;
 diff --git a/wie-wipi-c/src/api.rs b/wie-wipi-c/src/api.rs
 index 3898c17f..e22bfe39 100644
 --- a/wie-wipi-c/src/api.rs
