@@ -419,4 +419,218 @@ index 17d4376a..175d74b1 100644
 +    tracing::warn!("stub MC_netSetReadCB({fd}, {callback:#x}, {param:#x})");
 +    Ok(0)
 +}
-
+diff --git a/wie-wipi-c/src/api/qtc_database.rs b/wie-wipi-c/src/api/qtc_database.rs
+new file mode 100644
+index 00000000..bc252425
+--- /dev/null
++++ b/wie-wipi-c/src/api/qtc_database.rs
+@@ -0,0 +1,209 @@
++use alloc::{format, string::String, vec, vec::Vec};
++use core::mem::size_of;
++
++use bytemuck::{Pod, Zeroable};
++use wie_util::{Result, read_generic, read_null_terminated_string_bytes, write_generic};
++use wipi_types::wipic::WIPICWord;
++
++use crate::WIPICContext;
++
++const HANDLE_MAGIC: u32 = 0x5154_4344; // "QTCD"
++const HEADER_SIZE: usize = 45;
++
++#[derive(Clone, Copy, Pod, Zeroable)]
++#[repr(C)]
++struct Handle {
++    magic: u32,
++    record_size: u32,
++    record_count: u32,
++    records_ptr: u32,
++    records_capacity: u32,
++    cursor: u32,
++}
++
++/// KTF's fixed-record database used by older native titles. Packaged files
++/// carry the `qtcdb` header and are addressed without the `.db` suffix.
++pub async fn open(context: &mut dyn WIPICContext, name_ptr: WIPICWord, record_size: u32, create: u32, _kind: u32) -> Result<i32> {
++    let Ok(name) = String::from_utf8(read_null_terminated_string_bytes(context, name_ptr)?) else {
++        return Ok(-22);
++    };
++    if record_size == 0 {
++        return Ok(-22);
++    }
++
++    let path = format!("{name}.db");
++    let bytes = read_file(context, &path).await;
++    if bytes.is_none() && create == 0 {
++        return Ok(-12);
++    }
++
++    let mut records = Vec::new();
++    if let Some(bytes) = bytes
++        && bytes.len() >= HEADER_SIZE
++        && &bytes[..5] == b"qtcdb"
++    {
++        let stored_size = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
++        if stored_size == record_size as usize {
++            let mut cursor = HEADER_SIZE;
++            while cursor + 1 + stored_size <= bytes.len() {
++                if bytes[cursor] != 0 {
++                    records.extend_from_slice(&bytes[cursor + 1..cursor + 1 + stored_size]);
++                }
++                cursor += 1 + stored_size;
++            }
++        }
++    }
++
++    let capacity = records.len().max(record_size as usize * 4) as u32;
++    let records_ptr = context.alloc_raw(capacity)?;
++    if !records.is_empty() {
++        context.write_bytes(records_ptr, &records)?;
++    }
++    let handle = Handle {
++        magic: HANDLE_MAGIC,
++        record_size,
++        record_count: records.len() as u32 / record_size,
++        records_ptr,
++        records_capacity: capacity,
++        cursor: 0,
++    };
++    let handle_ptr = context.alloc_raw(size_of::<Handle>() as u32)?;
++    write_generic(context, handle_ptr, handle)?;
++    tracing::debug!(
++        "qtcdb.open({name:?}, record_size={record_size}, create={create}) -> {handle_ptr:#x}, records={}",
++        handle.record_count
++    );
++    Ok(handle_ptr as i32)
++}
++
++pub async fn close(context: &mut dyn WIPICContext, handle_ptr: i32) -> Result<i32> {
++    let Some(handle) = load_handle(context, handle_ptr)? else {
++        return Ok(-25);
++    };
++    context.free_raw(handle.records_ptr, handle.records_capacity)?;
++    context.free_raw(handle_ptr as u32, size_of::<Handle>() as u32)?;
++    tracing::debug!("qtcdb.close({handle_ptr:#x})");
++    Ok(0)
++}
++
++pub async fn add(context: &mut dyn WIPICContext, handle_ptr: i32, data_ptr: WIPICWord, length: u32) -> Result<i32> {
++    let Some(mut handle) = load_handle(context, handle_ptr)? else {
++        return Ok(-25);
++    };
++    if length != handle.record_size {
++        return Ok(-22);
++    }
++    let end = (handle.record_count + 1)
++        .checked_mul(handle.record_size)
++        .ok_or(wie_util::WieError::InvalidMemoryAccess(0))?;
++    if end > handle.records_capacity {
++        let new_capacity = end.max(handle.records_capacity.saturating_mul(2));
++        let new_ptr = context.alloc_raw(new_capacity)?;
++        let mut old = vec![0; (handle.record_count * handle.record_size) as usize];
++        context.read_bytes(handle.records_ptr, &mut old)?;
++        context.write_bytes(new_ptr, &old)?;
++        context.free_raw(handle.records_ptr, handle.records_capacity)?;
++        handle.records_ptr = new_ptr;
++        handle.records_capacity = new_capacity;
++    }
++    let mut data = vec![0; length as usize];
++    context.read_bytes(data_ptr, &mut data)?;
++    context.write_bytes(handle.records_ptr + handle.record_count * handle.record_size, &data)?;
++    handle.record_count += 1;
++    write_generic(context, handle_ptr as u32, handle)?;
++    tracing::debug!("qtcdb.add({handle_ptr:#x}, {data_ptr:#x}, {length}) -> {}", handle.record_count - 1);
++    Ok((handle.record_count - 1) as i32)
++}
++
++pub async fn find(context: &mut dyn WIPICContext, handle_ptr: i32, index: i32, out_ptr: WIPICWord, length: u32) -> Result<i32> {
++    let Some(mut handle) = load_handle(context, handle_ptr)? else {
++        return Ok(-25);
++    };
++    if length != handle.record_size {
++        return Ok(-22);
++    }
++    if handle.record_count == 0 {
++        return Ok(-22);
++    }
++    let index = if index < 0 { 0 } else { index as u32 };
++    if index >= handle.record_count {
++        return Ok(-22);
++    }
++    let mut data = vec![0; handle.record_size as usize];
++    context.read_bytes(handle.records_ptr + index * handle.record_size, &mut data)?;
++    context.write_bytes(out_ptr, &data)?;
++    handle.cursor = index + 1;
++    write_generic(context, handle_ptr as u32, handle)?;
++    tracing::debug!("qtcdb.find({handle_ptr:#x}, index={index}, out={out_ptr:#x}, {length}) -> 0");
++    Ok(0)
++}
++
++pub async fn get(context: &mut dyn WIPICContext, handle_ptr: i32, index: i32, out_ptr: WIPICWord, length: u32) -> Result<i32> {
++    let Some(mut handle) = load_handle(context, handle_ptr)? else {
++        return Ok(-25);
++    };
++    let index = if index < 0 { handle.cursor } else { index as u32 };
++    tracing::debug!("qtcdb.get({handle_ptr:#x}, index={index}, out={out_ptr:#x}, {length})");
++    if index >= handle.record_count || length < handle.record_size {
++        return Ok(-22);
++    }
++    let mut data = vec![0; handle.record_size as usize];
++    context.read_bytes(handle.records_ptr + index * handle.record_size, &mut data)?;
++    context.write_bytes(out_ptr, &data)?;
++    handle.cursor = index + 1;
++    write_generic(context, handle_ptr as u32, handle)?;
++    Ok(0)
++}
++
++fn load_handle(context: &mut dyn WIPICContext, ptr: i32) -> Result<Option<Handle>> {
++    if ptr < 0x10000 {
++        return Ok(None);
++    }
++    let handle: Handle = read_generic(context, ptr as u32)?;
++    Ok((handle.magic == HANDLE_MAGIC).then_some(handle))
++}
++
++async fn read_file(context: &mut dyn WIPICContext, path: &str) -> Option<Vec<u8>> {
++    let size = context.system().filesystem().size(path).await?;
++    let mut bytes = vec![0; size];
++    let read = context.system().filesystem().read(path, 0, size, &mut bytes).await?;
++    bytes.truncate(read);
++    Some(bytes)
++}
++
++#[cfg(test)]
++mod tests {
++    use alloc::{boxed::Box, vec};
++
++    use test_utils::TestPlatform;
++    use wie_backend::{DefaultTaskRunner, System};
++    use wie_util::{ByteRead, ByteWrite};
++
++    use crate::context::test::TestContext;
++
++    use super::{close, find, get, open};
++
++    #[futures_test::test]
++    async fn reads_packaged_fixed_records_in_order() {
++        let system = System::new(Box::new(TestPlatform::new()), "test-pid", "test-aid", DefaultTaskRunner);
++        let mut file = vec![0; 45];
++        file[..5].copy_from_slice(b"qtcdb");
++        file[8..12].copy_from_slice(&4u32.to_le_bytes());
++        file.extend_from_slice(&[1, 1, 2, 3, 4, 1, 5, 6, 7, 8]);
++        system.filesystem().add_virtual("records.db", file);
++
++        let mut context = TestContext::with_system(system);
++        context.write_bytes(0x1000, b"records\0").unwrap();
++        let handle = open(&mut context, 0x1000, 4, 0, 1).await.unwrap();
++
++        assert_eq!(find(&mut context, handle, -1, 0x2000, 4).await.unwrap(), 0);
++        assert_eq!(get(&mut context, handle, -1, 0x2010, 4).await.unwrap(), 0);
++        let mut first = [0; 4];
++        let mut second = [0; 4];
++        context.read_bytes(0x2000, &mut first).unwrap();
++        context.read_bytes(0x2010, &mut second).unwrap();
++        assert_eq!(first, [1, 2, 3, 4]);
++        assert_eq!(second, [5, 6, 7, 8]);
++        assert_eq!(close(&mut context, handle).await.unwrap(), 0);
++    }
++}
