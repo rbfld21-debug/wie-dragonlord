@@ -1,22 +1,14 @@
 diff --git a/wie-core-arm/data/binary_patches.toml b/wie-core-arm/data/binary_patches.toml
-index ddd2fae2..a7b15d3c 100644
+index ddd2fae2..dfa06f81 100644
 --- a/wie-core-arm/data/binary_patches.toml
 +++ b/wie-core-arm/data/binary_patches.toml
-@@ -50,6 +50,25 @@
+@@ -50,6 +50,17 @@
  # patches/hooks is fatal (likely a stale entry against an updated binary);
  # generic (hash-less) entries warn and continue.
  
 +[[entry]]
-+name = "Dragonlord offline startup"
++name = "Dragonlord completion input"
 +hash = "ab2164985fc4fbafc0c7d15c9d902aa2"
-+
-+# The original updater calls a discontinued KTF content server before starting
-+# the bundled game. Start the game from the packaged resources and mark the
-+# updater complete.
-+[[entry.patch]]
-+pc = 0x1136d6
-+expect = "e8 68 00 28 03 d1 20 1c 08 bc 9a 46 f0 bd 28 f0 80 f8 f8 e7"
-+bytes = "68 68 00 21 fd f7 05 fe 07 23 ab 64 20 46 08 bc 9a 46 f0 bd"
 +
 +# The completion screen normally waits for an OK key event. Treat its first
 +# event as confirmation so the updater retires through its normal event path.
