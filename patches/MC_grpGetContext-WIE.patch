@@ -299,10 +299,24 @@ index 2989cbf3..64103703 100644
      tracing::debug!("MC_mdaPlay({ptr_clip:#x}, {repeat})");
  
 diff --git a/wie-wipi-c/src/api/net.rs b/wie-wipi-c/src/api/net.rs
-index 17d4376a..175d74b1 100644
+index 17d4376a..86392fbc 100644
 --- a/wie-wipi-c/src/api/net.rs
 +++ b/wie-wipi-c/src/api/net.rs
-@@ -42,3 +42,16 @@ pub async fn socket_close(_context: &mut dyn WIPICContext, fd: i32) -> Result<i3
+@@ -20,7 +20,12 @@ pub async fn connect(context: &mut dyn WIPICContext, cb: WIPICWord, param: WIPIC
+         async fn call(&self, context: &mut dyn WIPICContext, _: Box<[WIPICWord]>) -> Result<WIPICResult> {
+             context.system().sleep(1).await; // simulate some delay
+ 
+-            context.call_function(self.cb, &[u32::MAX, self.param]).await?; // callback with M_E_ERROR
++            // MC_netConnect activates the handset's packet-data context; it
++            // does not itself open a remote socket. The emulator has no
++            // carrier context to activate, so report the local activation as
++            // successful and let later socket/HTTP operations report their
++            // own availability.
++            context.call_function(self.cb, &[0, self.param]).await?;
+ 
+             Ok(WIPICResult { results: Vec::new() })
+         }
+@@ -42,3 +47,16 @@ pub async fn socket_close(_context: &mut dyn WIPICContext, fd: i32) -> Result<i3
  
      Ok(-1) // M_E_ERROR
  }
