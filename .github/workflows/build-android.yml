@@ -18,7 +18,9 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Check out WIE source
-        run: git clone --depth 1 https://github.com/dlunch/wie.git source
+        run: |
+          git clone https://github.com/dlunch/wie.git source
+          git -C source checkout 47b41b55f5fcc3def406a51abe567ce71f5025d2
 
       - name: Apply Dragonlord compatibility patch
         run: git -C source apply "$GITHUB_WORKSPACE/patches/MC_grpGetContext-WIE.patch"
@@ -117,4 +119,3 @@ jobs:
           name: wie-dragonlord-android
           path: dist/wie-dragonlord-aarch64.apk
           if-no-files-found: error
-
