@@ -33,24 +33,21 @@ index 520a5322..6fc0e28a 100644
  };
  
  use crate::runtime::{
-@@ -282,7 +282,7 @@ pub fn get_media_method_table() -> Vec<WIPICMethodBody> {
-         gen_stub(12, "MC_mdaUnk12"),
-         gen_stub(13, "MC_mdaUnk13"),
+@@ -284,3 +284,3 @@ pub fn get_media_method_table() -> Vec<WIPICMethodBody> {
          media::get_volume.into_body(),
 -        gen_stub(15, "MC_mdaUnk15"),
 +        media::set_volume.into_body(),
          media::vibrator.into_body(),
-         media::unk17.into_body(),
-         media::unk18.into_body(),
-@@ -298,7 +298,7 @@ pub fn get_media_method_table() -> Vec<WIPICMethodBody> {
- }
- 
+@@ -300,3 +300,3 @@ pub fn get_net_method_table() -> Vec<WIPICMethodBody> {
  pub fn get_net_method_table() -> Vec<WIPICMethodBody> {
 -    vec![
 +    let mut methods = vec![
          net::connect.into_body(),
+@@ -303,3 +303,3 @@ pub fn get_net_method_table() -> Vec<WIPICMethodBody> {
          net::close.into_body(),
-         gen_stub(2, "MC_netSocket"),
+-        gen_stub(2, "MC_netSocket"),
++        net::socket.into_body(),
+         gen_stub(3, "MC_netSocketConnect"),
 @@ -312,8 +312,8 @@ pub fn get_net_method_table() -> Vec<WIPICMethodBody> {
          gen_stub(10, "MC_netSocketRcvFrom"),
          gen_stub(11, "MC_netGetHostAddr"),
@@ -316,7 +313,22 @@ index 17d4376a..86392fbc 100644
  
              Ok(WIPICResult { results: Vec::new() })
          }
-@@ -42,3 +47,16 @@ pub async fn socket_close(_context: &mut dyn WIPICContext, fd: i32) -> Result<i3
+@@ -37,8 +42,31 @@ pub async fn close(_context: &mut dyn WIPICContext) -> Result<()> {
+     Ok(())
+ }
+ 
++/// Create a network socket.
++///
++/// WIE does not currently provide a socket backend. Returning the documented
++/// error value lets legacy applications take their offline/error path instead
++/// of aborting in the generated "unimplemented" method stub.
++pub async fn socket(_context: &mut dyn WIPICContext, domain: i32, socket_type: i32, protocol: i32) -> Result<i32> {
++    tracing::warn!("unsupported MC_netSocket({domain}, {socket_type}, {protocol})");
++    Ok(-1) // M_E_ERROR
++}
++
+ pub async fn socket_close(_context: &mut dyn WIPICContext, fd: i32) -> Result<i32> {
+     tracing::warn!("stub MC_netSocketClose({fd})");
  
      Ok(-1) // M_E_ERROR
  }
