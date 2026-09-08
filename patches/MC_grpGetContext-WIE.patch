@@ -17,15 +17,15 @@ index ddd2fae2..dfa06f81 100644
 +expect = "1b 28"
 +bytes = "02 e0"
 +
-+# Choosing "No" on the obsolete download retry prompt used to enter the
-+# handset-exit path. The Android host intentionally ignores handset exits,
-+# leaving the dialog object suspended forever. Reuse the title's own update
-+# completion body instead; it clears the dialog and records completion before
-+# returning to the normal scene controller.
++# Android keypad events do not consistently normalize to the title's original
++# 1/2 soft-key codes. Once the obsolete download error dialog receives any
++# input, reuse the title's own update-completion body. This clears the dialog
++# and records completion without retrying the dead server or invoking handset
++# exit, while preserving the game's normal scene-controller transition.
 +[[entry.patch]]
-+pc = 0x11395a
-+expect = "0d 48"
-+bytes = "2a e0"
++pc = 0x113948
++expect = "20 1c"
++bytes = "33 e0"
 +
  [[entry]]
  name = "Generic compiler library / inline copy patterns"
