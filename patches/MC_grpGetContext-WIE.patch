@@ -2,7 +2,7 @@ diff --git a/wie-core-arm/data/binary_patches.toml b/wie-core-arm/data/binary_pa
 index ddd2fae2..dfa06f81 100644
 --- a/wie-core-arm/data/binary_patches.toml
 +++ b/wie-core-arm/data/binary_patches.toml
-@@ -50,6 +50,37 @@
+@@ -50,6 +50,48 @@
  # patches/hooks is fatal (likely a stale entry against an updated binary);
  # generic (hash-less) entries warn and continue.
  
@@ -36,6 +36,17 @@ index ddd2fae2..dfa06f81 100644
 +pc = 0x1139d4
 +expect = "20 1c"
 +bytes = "ed e7"
++
++# Dragonlord ships its playable data in the application archive, but its
++# legacy updater still initializes as incomplete and enters carrier-network
++# dialogs. Complete the updater controller at construction time: preserve the
++# object fields initialized above, set its native completion flag, and return
++# to the game's scene controller. This avoids depending on dead servers,
++# handset-specific numeric key codes, or a transient dialog state.
++[[entry.patch]]
++pc = 0x1135d8
++expect = "83 62 00 f0 19 f8"
++bytes = "01 23 03 61 00 bd"
 +
  [[entry]]
  name = "Generic compiler library / inline copy patterns"
