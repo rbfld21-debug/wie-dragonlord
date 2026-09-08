@@ -2,7 +2,7 @@ diff --git a/wie-core-arm/data/binary_patches.toml b/wie-core-arm/data/binary_pa
 index ddd2fae2..dfa06f81 100644
 --- a/wie-core-arm/data/binary_patches.toml
 +++ b/wie-core-arm/data/binary_patches.toml
-@@ -50,6 +50,17 @@
+@@ -50,6 +50,27 @@
  # patches/hooks is fatal (likely a stale entry against an updated binary);
  # generic (hash-less) entries warn and continue.
  
@@ -16,6 +16,16 @@ index ddd2fae2..dfa06f81 100644
 +pc = 0x1139aa
 +expect = "1b 28"
 +bytes = "02 e0"
++
++# Choosing "No" on the obsolete download retry prompt used to enter the
++# handset-exit path. The Android host intentionally ignores handset exits,
++# leaving the dialog object suspended forever. Reuse the title's own update
++# completion body instead; it clears the dialog and records completion before
++# returning to the normal scene controller.
++[[entry.patch]]
++pc = 0x11395a
++expect = "0d 48"
++bytes = "2a e0"
 +
  [[entry]]
  name = "Generic compiler library / inline copy patterns"
