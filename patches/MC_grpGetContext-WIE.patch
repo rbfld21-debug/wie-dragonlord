@@ -2,7 +2,7 @@ diff --git a/wie-core-arm/data/binary_patches.toml b/wie-core-arm/data/binary_pa
 index ddd2fae2..dfa06f81 100644
 --- a/wie-core-arm/data/binary_patches.toml
 +++ b/wie-core-arm/data/binary_patches.toml
-@@ -50,6 +50,27 @@
+@@ -50,6 +50,37 @@
  # patches/hooks is fatal (likely a stale entry against an updated binary);
  # generic (hash-less) entries warn and continue.
  
@@ -26,6 +26,16 @@ index ddd2fae2..dfa06f81 100644
 +pc = 0x113948
 +expect = "20 1c"
 +bytes = "33 e0"
++
++# The preceding carrier-data charge confirmation uses a separate OK-only
++# handler even though its artwork advertises numeric 1/2 choices. Android's
++# keypad therefore leaves it waiting indefinitely. Route that handler through
++# the same native completion body after it draws, avoiding the retired network
++# updater while retaining the normal completion flag and scene transition.
++[[entry.patch]]
++pc = 0x1139d4
++expect = "20 1c"
++bytes = "ed e7"
 +
  [[entry]]
  name = "Generic compiler library / inline copy patterns"
