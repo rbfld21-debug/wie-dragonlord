@@ -166,6 +166,44 @@ index f43e78d0..25c4680e 100644
      fn exit(&self) {}
  
      fn vibrate(&self, duration_ms: u64, intensity: u8) {
+diff --git a/wie-web/src/ts/app.ts b/wie-web/src/ts/app.ts
+index 74f18065..2f12bb3f 100644
+--- a/wie-web/src/ts/app.ts
++++ b/wie-web/src/ts/app.ts
+@@ -54,17 +54,32 @@ export const runApp = (app: AppMetadata, archive: Uint8Array, fontData: Uint8Arr
+   for (const button of document.querySelectorAll<HTMLButtonElement>("button[data-key]")) {
+     const key = button.dataset.key!;
++    let pressedAt = 0;
++    let releaseTimer: number | undefined;
+     button.addEventListener(
+       "pointerdown",
+       (event) => {
+         event.preventDefault();
+         button.setPointerCapture(event.pointerId);
++        if (releaseTimer !== undefined) {
++          window.clearTimeout(releaseTimer);
++          releaseTimer = undefined;
++        }
++        pressedAt = performance.now();
+         wieWeb.key_down(key);
+       },
+       { signal: abortController.signal },
+     );
+     const releaseKey = (event: PointerEvent) => {
+       event.preventDefault();
+-      wieWeb.key_up(key);
++      // A quick Android tap can deliver pointerdown and pointerup before the
++      // emulator gets its next animation-frame tick. Keep the virtual handset
++      // key down across at least one frame so legacy WIPI titles observe the
++      // press instead of seeing both events in the same polling cycle.
++      const remaining = Math.max(0, 34 - (performance.now() - pressedAt));
++      releaseTimer = window.setTimeout(() => {
++        wieWeb.key_up(key);
++        releaseTimer = undefined;
++      }, remaining);
+     };
+     button.addEventListener("pointerup", releaseKey, { signal: abortController.signal });
+     button.addEventListener("pointercancel", releaseKey, { signal: abortController.signal });
 diff --git a/wie-wipi-c/src/api.rs b/wie-wipi-c/src/api.rs
 index 3898c17f..e22bfe39 100644
 --- a/wie-wipi-c/src/api.rs
