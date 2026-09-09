@@ -152,6 +152,19 @@ index 520a5322..6fc0e28a 100644
 +        assert!(get_method_body(WIPICTableId::Net, 34).is_some());
 +    }
 +}
+diff --git a/wie-backend/src/system/event_queue.rs b/wie-backend/src/system/event_queue.rs
+index 08213091..8af55bdf 100644
+--- a/wie-backend/src/system/event_queue.rs
++++ b/wie-backend/src/system/event_queue.rs
+@@ -44,6 +44,8 @@ impl KeyCode {
+             "LEFT" => KeyCode::LEFT,
+             "RIGHT" => KeyCode::RIGHT,
+             "OK" => KeyCode::OK,
++            "LSK" => KeyCode::LEFT_SOFT_KEY,
++            "RSK" => KeyCode::RIGHT_SOFT_KEY,
+             "0" => KeyCode::NUM0,
+             "1" => KeyCode::NUM1,
+             "2" => KeyCode::NUM2,
 diff --git a/wie-web/src/rust/lib.rs b/wie-web/src/rust/lib.rs
 index f43e78d0..25c4680e 100644
 --- a/wie-web/src/rust/lib.rs
@@ -167,12 +180,17 @@ index f43e78d0..25c4680e 100644
  
      fn vibrate(&self, duration_ms: u64, intensity: u8) {
 diff --git a/wie-web/src/ts/app.ts b/wie-web/src/ts/app.ts
-index 74f18065..2f12bb3f 100644
+index 74f18065..9d3d4401 100644
 --- a/wie-web/src/ts/app.ts
 +++ b/wie-web/src/ts/app.ts
-@@ -54,17 +54,32 @@ export const runApp = (app: AppMetadata, archive: Uint8Array, fontData: Uint8Arr
+@@ -51,20 +51,49 @@ export const runApp = (app: AppMetadata, archive: Uint8Array, fontData: Uint8Arr
+   backToLibrary.addEventListener("click", () => exit(), { signal: abortController.signal });
+   appSettings.addEventListener("click", settings.open, { signal: abortController.signal });
+ 
++  let dragonlordStartupChoicePending = app.title.includes("드래곤로드");
    for (const button of document.querySelectorAll<HTMLButtonElement>("button[data-key]")) {
      const key = button.dataset.key!;
++    let pressedKeys = [key];
 +    let pressedAt = 0;
 +    let releaseTimer: number | undefined;
      button.addEventListener(
@@ -180,12 +198,23 @@ index 74f18065..2f12bb3f 100644
        (event) => {
          event.preventDefault();
          button.setPointerCapture(event.pointerId);
+-        wieWeb.key_down(key);
 +        if (releaseTimer !== undefined) {
 +          window.clearTimeout(releaseTimer);
 +          releaseTimer = undefined;
 +        }
 +        pressedAt = performance.now();
-         wieWeb.key_down(key);
++        pressedKeys = [key];
++        if (dragonlordStartupChoicePending && (key === "1" || key === "OK")) {
++          // Early KTF builds disagree on whether the carrier confirmation's
++          // affirmative choice is reported as numeric 1, fire/OK, or the left
++          // soft key. Send all three aliases for the first startup choice.
++          pressedKeys = ["1", "OK", "LSK"];
++          dragonlordStartupChoicePending = false;
++        }
++        for (const pressedKey of pressedKeys) {
++          wieWeb.key_down(pressedKey);
++        }
        },
        { signal: abortController.signal },
      );
@@ -198,7 +227,9 @@ index 74f18065..2f12bb3f 100644
 +      // press instead of seeing both events in the same polling cycle.
 +      const remaining = Math.max(0, 34 - (performance.now() - pressedAt));
 +      releaseTimer = window.setTimeout(() => {
-+        wieWeb.key_up(key);
++        for (const pressedKey of pressedKeys) {
++          wieWeb.key_up(pressedKey);
++        }
 +        releaseTimer = undefined;
 +      }, remaining);
      };
