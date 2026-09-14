@@ -105,10 +105,10 @@ index ddd2fae2..826b3930 100644
 
 diff --git a/wie-ktf/examples/dragonlord_verify.rs b/wie-ktf/examples/dragonlord_verify.rs
 new file mode 100644
-index 00000000..150ae0c3
+index 00000000..e5ea5332
 --- /dev/null
 +++ b/wie-ktf/examples/dragonlord_verify.rs
-@@ -0,0 +1,77 @@
+@@ -0,0 +1,81 @@
 +use std::{
 +    env, fs,
 +    sync::{Arc, atomic::{AtomicBool, Ordering}},
@@ -126,10 +126,14 @@ index 00000000..150ae0c3
 +}
 +
 +fn save_ppm(path: &str, frame: &[u32]) -> Result<()> {
-+    if frame.len() != 240 * 320 {
++    let (width, height) = match frame.len() {
++        38_720 => (176, 220),
++        76_800 => (320, 240),
++        _ => {
 +        return Err(WieError::FatalError(format!("unexpected frame size: {}", frame.len())));
-+    }
-+    let mut output = format!("P6\n320 240\n255\n").into_bytes();
++        }
++    };
++    let mut output = format!("P6\n{width} {height}\n255\n").into_bytes();
 +    for pixel in frame {
 +        let [_, r, g, b] = pixel.to_be_bytes();
 +        output.extend_from_slice(&[r, g, b]);
