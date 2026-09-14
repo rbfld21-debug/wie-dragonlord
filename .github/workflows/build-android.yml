@@ -45,6 +45,14 @@ jobs:
           path: source/target/release/examples/dragonlord_verify
           if-no-files-found: error
 
+      - name: Publish headless verifier prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view verification-runner >/dev/null 2>&1 || \
+            gh release create verification-runner --prerelease --title "Dragonlord verification runner" --notes "Automated headless verification tool."
+          gh release upload verification-runner source/target/release/examples/dragonlord_verify --clobber
+
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:

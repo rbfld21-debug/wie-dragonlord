@@ -1,0 +1,27 @@
+name: Publish Dragonlord verifier
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [codex/mc-grp-get-context]
+
+permissions:
+  contents: write
+
+jobs:
+  verifier:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: git clone https://github.com/dlunch/wie.git source
+      - run: git -C source checkout 4924e28a93b0
+      - run: git -C source apply "$GITHUB_WORKSPACE/patches/MC_grpGetContext-WIE.patch"
+      - uses: dtolnay/rust-toolchain@stable
+      - working-directory: source
+        run: cargo build --release -p wie-ktf --example dragonlord_verify
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view verification-runner >/dev/null 2>&1 || \
+            gh release create verification-runner --prerelease --title "Dragonlord verification runner" --notes "Automated headless verification tool."
+          gh release upload verification-runner source/target/release/examples/dragonlord_verify --clobber
