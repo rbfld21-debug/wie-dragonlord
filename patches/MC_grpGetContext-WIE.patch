@@ -187,7 +187,7 @@ index 00000000..150ae0c3
 +    Ok(())
 +}
 diff --git a/wie-ktf/src/runtime/wipi_c/context.rs b/wie-ktf/src/runtime/wipi_c/context.rs
-index e5e02902..756b718c 100644
+index e5e02902..9abe9668 100644
 --- a/wie-ktf/src/runtime/wipi_c/context.rs
 +++ b/wie-ktf/src/runtime/wipi_c/context.rs
 @@ -118,7 +118,11 @@ impl WIPICContext for KtfWIPICContext {
@@ -199,7 +199,7 @@ index e5e02902..756b718c 100644
 +            return Ok(result);
 +        }
 +
-+        Ok(self.system().filesystem().size(name).await)
++        Ok(self.system.filesystem().size(name).await)
      }
 
      async fn read_resource(&self, name: &str) -> Result<Vec<u8>> {
@@ -209,11 +209,11 @@ index e5e02902..756b718c 100644
              Ok(Some(stream)) => stream,
 -            Ok(None) => return Err(WieError::FatalError(alloc::format!("Resource disappeared before read: {name:?}"))),
 +            Ok(None) => {
-+                let Some(size) = self.system().filesystem().size(name).await else {
++                let Some(size) = self.system.filesystem().size(name).await else {
 +                    return Err(WieError::FatalError(alloc::format!("Resource disappeared before read: {name:?}")));
 +                };
 +                let mut data = alloc::vec![0; size];
-+                let Some(read) = self.system().filesystem().read(name, 0, size, &mut data).await else {
++                let Some(read) = self.system.filesystem().read(name, 0, size, &mut data).await else {
 +                    return Err(WieError::FatalError(alloc::format!("Failed to read filesystem resource: {name:?}")));
 +                };
 +                data.truncate(read);
