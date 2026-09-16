@@ -7,7 +7,7 @@ index 591e936..7c3a1a8 100644
    "$schema": "https://schema.tauri.app/config/2",
    "productName": "wie",
 -  "version": "0.1.4",
-+  "version": "0.1.8",
++  "version": "0.1.9",
    "identifier": "net.dlunch.wie",
    "build": {
      "frontendDist": "../wie-web/dist",
@@ -466,3 +466,189 @@ index 74584606..f75450ed 100644
  
      string.chars().map(|c| font.h_advance(font.scaled_glyph(c).id)).sum::<f32>()
  }
+diff --git a/Cargo.toml b/Cargo.toml
+index 173f29c0..cc153b58 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -27,6 +27,9 @@ opt-level = 1
+ 
+ [profile.release]
+ lto = true
++codegen-units = 1
++opt-level = 3
++panic = "abort"
+ 
+ [workspace.package]
+ version = "0.1.4"
+diff --git a/wie-core-arm/src/core.rs b/wie-core-arm/src/core.rs
+index db698839..012ea3ac 100644
+--- a/wie-core-arm/src/core.rs
++++ b/wie-core-arm/src/core.rs
+@@ -19,7 +19,10 @@ const GLOBAL_DATA_BASE: u32 = 0x7fff0000;
+ const FUNCTIONS_BASE: u32 = 0x71000000;
+ const FUNCTIONS_SIZE: usize = 0x10000;
+ const SVC_STUB_SIZE: u32 = 16;
+-const INSTRUCTIONS_PER_YIELD: u32 = 10_000;
++// ARM interpretation is the dominant cost in the WebAssembly build. Larger
++// slices avoid repeatedly unwinding and polling the async task graph while
++// still returning to the executor several times inside its time budget.
++const INSTRUCTIONS_PER_YIELD: u32 = 100_000;
+ pub const RUN_FUNCTION_LR: u32 = 0x7f000000;
+ pub const HEAP_BASE: u32 = 0x40000000;
+ pub const HEAP_SIZE: u32 = 0x10000000;
+@@ -882,25 +885,25 @@ mod tests {
+     }
+ 
+     #[test]
+-    fn yields_every_ten_thousand_instructions_across_svc() {
++    fn yields_every_instruction_slice_across_svc() {
+         let mut core = ArmCore::new(false, None).unwrap();
+         let calls = Arc::new(AtomicU32::new(0));
+         core.register_svc_handler(1, count_inline_svc, &calls).unwrap();
+-        let mut code = [0x01, 0x30, 0x01, 0xdf].repeat(10_000); // add r0, #1; svc #1
++        let mut code = [0x01, 0x30, 0x01, 0xdf].repeat(100_000); // add r0, #1; svc #1
+         code.extend_from_slice(&[0x70, 0x47]); // bx lr
+         core.load(&code, 0x1000, code.len()).unwrap();
+ 
+         let observer = core.clone();
+         let mut run = pin!(core.run_function::<u32>(0x1001, &[0]));
+         let mut cx = Context::from_waker(Waker::noop());
+-        for completed in [5_000, 10_000] {
++        for completed in [50_000, 100_000] {
+             assert!(run.as_mut().poll(&mut cx).is_pending());
+             assert_eq!(observer.read_param(0).unwrap(), completed);
+             assert_eq!(calls.load(Ordering::Relaxed), completed - 1);
+             assert_eq!(observer.save_context().cpsr & 0x3f, 0x3f);
+         }
+-        assert!(matches!(run.as_mut().poll(&mut cx), Poll::Ready(Ok(10_000))));
+-        assert_eq!(calls.load(Ordering::Relaxed), 10_000);
++        assert!(matches!(run.as_mut().poll(&mut cx), Poll::Ready(Ok(100_000))));
++        assert_eq!(calls.load(Ordering::Relaxed), 100_000);
+     }
+ 
+     #[test]
+diff --git a/wie-core-arm/src/engine/arm32_cpu.rs b/wie-core-arm/src/engine/arm32_cpu.rs
+index 5dbad8ff..47486bf0 100644
+--- a/wie-core-arm/src/engine/arm32_cpu.rs
++++ b/wie-core-arm/src/engine/arm32_cpu.rs
+@@ -1,6 +1,4 @@
+ use alloc::{boxed::Box, format, vec};
+-use core::cell::RefCell;
+-
+ use arm32_cpu::{Cpu, Memory, Mode, reg};
+ 
+ use wie_util::{Result, WieError};
+@@ -19,39 +17,37 @@ impl Arm32CpuEngine {
+             mem: EmulatedMemory::new(),
+         }
+     }
+-
+-    fn is_svc_exception(&self) -> bool {
+-        self.cpu.reg_get(Mode::User, reg::PC) == 0x08 && (self.cpu.reg_get(Mode::User, reg::CPSR) & 0x1f) == 0x13
+-    }
+-
+-    fn read_svc_result(&mut self) -> Result<EngineStopReason> {
+-        let lr = self.cpu.reg_get(Mode::Supervisor, reg::LR);
+-        let spsr = self.cpu.reg_get(Mode::Supervisor, reg::SPSR);
+-
+-        let svc_address = lr.checked_sub(2).ok_or(WieError::InvalidMemoryAccess(lr))?;
+-        let mut svc_bytes = [0u8; 2];
+-        self.mem.read_range(svc_address, 2, &mut svc_bytes)?;
+-        let instruction = u16::from_le_bytes(svc_bytes);
+-        if instruction & 0xff00 != 0xdf00 {
+-            return Err(WieError::FatalError(format!(
+-                "Invalid Thumb SVC instruction {instruction:#06x} at {svc_address:#x}"
+-            )));
+-        }
+-
+-        let category = instruction as u32 & 0xff;
+-
+-        Ok(EngineStopReason::Svc { category, lr, spsr })
+-    }
+ }
+ 
+ impl ArmEngine for Arm32CpuEngine {
+     fn run(&mut self, end: u32, count: u32) -> Result<EngineRunResult> {
+         let mut instructions_executed = 0;
++        // Keep one memory adapter alive for the complete execution slice.
++        // Recreating it for every guest instruction is particularly expensive
++        // in WebAssembly, where this loop is the emulator's hottest path.
++        let cpu = &mut self.cpu;
++        let mut memory = self.mem.as_arm32cpu_memory();
+         let stop_reason = loop {
+-            let pc = self.cpu.reg_get(Mode::User, reg::PC);
+-
+-            if self.is_svc_exception() {
+-                break self.read_svc_result()?;
++            let pc = cpu.reg_get(Mode::User, reg::PC);
++
++            if cpu.reg_get(Mode::User, reg::PC) == 0x08 && (cpu.reg_get(Mode::User, reg::CPSR) & 0x1f) == 0x13 {
++                let lr = cpu.reg_get(Mode::Supervisor, reg::LR);
++                let spsr = cpu.reg_get(Mode::Supervisor, reg::SPSR);
++                let svc_address = lr.checked_sub(2).ok_or(WieError::InvalidMemoryAccess(lr))?;
++                let instruction = memory.r16(svc_address);
++                if let Some(address) = memory.memory_error() {
++                    return Err(WieError::InvalidMemoryAccess(address));
++                }
++                if instruction & 0xff00 != 0xdf00 {
++                    return Err(WieError::FatalError(format!(
++                        "Invalid Thumb SVC instruction {instruction:#06x} at {svc_address:#x}"
++                    )));
++                }
++                break EngineStopReason::Svc {
++                    category: instruction as u32 & 0xff,
++                    lr,
++                    spsr,
++                };
+             }
+ 
+             if pc < 0x1000 {
+@@ -66,14 +62,12 @@ impl ArmEngine for Arm32CpuEngine {
+                 break EngineStopReason::Yield;
+             }
+ 
+-            let mut arm32cpu_memory = self.mem.as_arm32cpu_memory();
+-
+-            if !(self.cpu.step(&mut arm32cpu_memory)) {
++            if !(cpu.step(&mut memory)) {
+                 return Err(WieError::FatalError("Undefined instruction".into()));
+             }
+             instructions_executed += 1;
+ 
+-            if let Some(x) = arm32cpu_memory.memory_error() {
++            if let Some(x) = memory.memory_error() {
+                 return Err(WieError::InvalidMemoryAccess(x));
+             }
+         };
+@@ -232,19 +226,19 @@ impl EmulatedMemory {
+ 
+ struct Arm32CpuMemory<'a> {
+     emulated_memory: &'a mut EmulatedMemory,
+-    memory_error: RefCell<Option<u32>>,
++    memory_error: Option<u32>,
+ }
+ 
+ impl<'a> Arm32CpuMemory<'a> {
+     fn new(emulated_memory: &'a mut EmulatedMemory) -> Self {
+         Self {
+             emulated_memory,
+-            memory_error: RefCell::new(None),
++            memory_error: None,
+         }
+     }
+ 
+     fn memory_error(&self) -> Option<u32> {
+-        *self.memory_error.borrow()
++        self.memory_error
+     }
+ 
+     fn get_page(&mut self, addr: u32) -> Option<&mut [u8; PAGE_SIZE]> {
+@@ -254,7 +248,7 @@ impl<'a> Arm32CpuMemory<'a> {
+         if let Some(x) = page_data {
+             Some(x)
+         } else {
+-            *self.memory_error.borrow_mut() = Some(addr);
++            self.memory_error = Some(addr);
+             None
+         }
+     }
