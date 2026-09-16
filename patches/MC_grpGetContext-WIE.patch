@@ -7,7 +7,7 @@ index 591e936..7c3a1a8 100644
    "$schema": "https://schema.tauri.app/config/2",
    "productName": "wie",
 -  "version": "0.1.4",
-+  "version": "0.1.7",
++  "version": "0.1.8",
    "identifier": "net.dlunch.wie",
    "build": {
      "frontendDist": "../wie-web/dist",
@@ -439,3 +439,30 @@ index e8cf0ab..1b731da 100644
      abortController.abort();
      unsubscribePcmVolume();
      wieWeb.free();
+diff --git a/wie-backend/src/canvas.rs b/wie-backend/src/canvas.rs
+index 74584606..f75450ed 100644
+--- a/wie-backend/src/canvas.rs
++++ b/wie-backend/src/canvas.rs
+@@ -623,8 +623,11 @@ where
+     }
+ 
+     fn draw_text(&mut self, font: &Font, string: &str, x: i32, y: i32, text_alignment: TextAlignment, color: Color, clip: Clip) {
+-        let size = 10.0; // TODO
+-        let font = font.0.as_scaled(font.0.pt_to_px_scale(size).unwrap());
++        // Mobile APIs specify their bitmap-font size in screen pixels. Treating
++        // this as typographic points enlarges 10 px text to roughly 13.3 px,
++        // which makes KTF menu and dialogue lines overlap.
++        let size = 10.0;
++        let font = font.0.as_scaled(size);
+ 
+         let total_width = string.chars().map(|c| font.h_advance(font.scaled_glyph(c).id)).sum::<f32>();
+         let x = match text_alignment {
+@@ -941,7 +944,7 @@ pub fn encode_png(image: &dyn Image) -> Result<Vec<u8>> {
+ }
+ 
+ pub fn string_width(font: &Font, string: &str, pt_size: f32) -> f32 {
+-    let font = font.0.as_scaled(font.0.pt_to_px_scale(pt_size).unwrap());
++    let font = font.0.as_scaled(pt_size);
+ 
+     string.chars().map(|c| font.h_advance(font.scaled_glyph(c).id)).sum::<f32>()
+ }
