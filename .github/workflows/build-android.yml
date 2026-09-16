@@ -8,7 +8,7 @@ on:
     branches: [main, codex/mc-grp-get-context]
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   android:
@@ -33,18 +33,6 @@ jobs:
       - name: Test compatibility layer
         working-directory: source
         run: cargo test -p wie-wipi-c
-
-      - name: Build Dragonlord headless verifier
-        working-directory: source
-        run: cargo build --release -p wie-ktf --example dragonlord_verify
-
-      - name: Publish headless verifier prerelease
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release view verification-runner >/dev/null 2>&1 || \
-            gh release create verification-runner --prerelease --title "Dragonlord verification runner" --notes "Automated headless verification tool."
-          gh release upload verification-runner source/target/release/examples/dragonlord_verify --clobber
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
