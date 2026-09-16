@@ -20,7 +20,7 @@ jobs:
       - name: Check out WIE source
         run: |
           git clone https://github.com/dlunch/wie.git source
-          git -C source checkout 4924e28a93b0
+          git -C source checkout 47b41b55f5fcc3def406a51abe567ce71f5025d2
 
       - name: Apply Dragonlord compatibility patch
         run: git -C source apply "$GITHUB_WORKSPACE/patches/MC_grpGetContext-WIE.patch"
@@ -33,25 +33,6 @@ jobs:
       - name: Test compatibility layer
         working-directory: source
         run: cargo test -p wie-wipi-c
-
-      - name: Build Dragonlord headless verifier
-        working-directory: source
-        run: cargo build --release -p wie-ktf --example dragonlord_verify
-
-      - name: Upload headless verifier
-        uses: actions/upload-artifact@v4
-        with:
-          name: dragonlord-headless-verifier
-          path: source/target/release/examples/dragonlord_verify
-          if-no-files-found: error
-
-      - name: Publish headless verifier prerelease
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release view verification-runner >/dev/null 2>&1 || \
-            gh release create verification-runner --prerelease --title "Dragonlord verification runner" --notes "Automated headless verification tool."
-          gh release upload verification-runner source/target/release/examples/dragonlord_verify --clobber
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
