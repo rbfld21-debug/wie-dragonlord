@@ -7,7 +7,7 @@ index 591e936..7c3a1a8 100644
    "$schema": "https://schema.tauri.app/config/2",
    "productName": "wie",
 -  "version": "0.1.4",
-+  "version": "0.1.6",
++  "version": "0.1.7",
    "identifier": "net.dlunch.wie",
    "build": {
      "frontendDist": "../wie-web/dist",
@@ -403,29 +403,39 @@ index 0000000..bc25242
 +        assert_eq!(close(&mut context, handle).await.unwrap(), 0);
 +    }
 +}
-diff --git a/wie-backend/src/executor.rs b/wie-backend/src/executor.rs
-index 8605f4a..f8d66fb 100644
---- a/wie-backend/src/executor.rs
-+++ b/wie-backend/src/executor.rs
-@@ -12,6 +12,12 @@ use wie_util::{Result, WieError};
+diff --git a/wie-web/src/ts/app.ts b/wie-web/src/ts/app.ts
+index e8cf0ab..1b731da 100644
+--- a/wie-web/src/ts/app.ts
++++ b/wie-web/src/ts/app.ts
+@@ -105,22 +105,28 @@ export const runApp = (app: AppMetadata, archive: Uint8Array, fontData: Uint8Arr
+     { signal: abortController.signal },
+   );
  
- use crate::time::Instant;
+-  const update = () => {
++  // Keep emulation independent from the display refresh rate. Running one
++  // executor slice per animation frame leaves the guest idle between frames
++  // and becomes especially slow when a mobile WebView drops to 30 Hz.
++  const updateChannel = new MessageChannel();
++  updateChannel.port1.onmessage = () => {
+     if (!running) {
+       return;
+     }
  
-+// Keep the guest running for most of a 60 Hz frame while leaving a small
-+// margin for canvas painting and browser event handling. The previous 8 ms
-+// slice left the emulated CPU idle for roughly half of every frame on the web
-+// frontend, which made ARM games and their audio-trigger timing run slowly.
-+const EXECUTOR_TIME_SLICE_MS: u64 = 14;
-+
- type Task = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
+     try {
+       wieWeb.update();
+-      requestAnimationFrame(update);
++      updateChannel.port2.postMessage(undefined);
+     } catch (error) {
+       exit(error);
+     }
+   };
+-  requestAnimationFrame(update);
++  updateChannel.port2.postMessage(undefined);
  
- pub struct ExecutorInner {
-@@ -108,7 +114,7 @@ impl Executor {
-     where
-         T: Fn() -> Instant,
-     {
--        let end = now() + 8; // TODO hardcoded
-+        let end = now() + EXECUTOR_TIME_SLICE_MS;
-         loop {
-             let now = now();
- 
+   return () => {
+     running = false;
++    updateChannel.port1.close();
++    updateChannel.port2.close();
+     abortController.abort();
+     unsubscribePcmVolume();
+     wieWeb.free();
