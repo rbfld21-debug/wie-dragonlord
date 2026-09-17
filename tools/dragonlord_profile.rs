@@ -21,14 +21,12 @@ fn press(emulator: &mut KtfEmulator, key: KeyCode) -> Result<()> {
 
 fn main() -> Result<()> {
     let zip_path = env::args().nth(1).ok_or_else(|| WieError::FatalError("usage: dragonlord_profile GAME.zip".into()))?;
-    let samples = Arc::new(spin::Mutex::new(BTreeMap::<u32, u64>::new()));
+    let samples = Arc::new(spin::Mutex::new(BTreeMap::<Vec<u32>, u64>::new()));
     let output = samples.clone();
     let profile = Box::new(move |batch: Vec<ProfileSample>| {
         let mut output = output.lock();
         for sample in batch {
-            if let Some(pc) = sample.stack.first() {
-                *output.entry(*pc).or_default() += sample.count;
-            }
+            *output.entry(sample.stack).or_default() += sample.count;
         }
     });
     let archive = extract_zip(&fs::read(zip_path).map_err(|error| WieError::FatalError(error.to_string()))?)?;
@@ -47,10 +45,11 @@ fn main() -> Result<()> {
     }
     drop(emulator);
 
-    let mut ranked = samples.lock().iter().map(|(pc, count)| (*count, *pc)).collect::<Vec<_>>();
+    let mut ranked = samples.lock().iter().map(|(stack, count)| (*count, stack.clone())).collect::<Vec<_>>();
     ranked.sort_unstable_by(|left, right| right.cmp(left));
-    for (count, pc) in ranked.into_iter().take(100) {
-        println!("{count:12} {pc:#010x}");
+    for (count, stack) in ranked.into_iter().take(100) {
+        let frames = stack.iter().map(|pc| format!("{pc:#010x}")).collect::<Vec<_>>().join(" ");
+        println!("{count:12} {frames}");
     }
     Ok(())
 }
