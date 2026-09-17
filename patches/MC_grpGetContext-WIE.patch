@@ -505,7 +505,7 @@ index a756777e..ae3001fc 100644
  
  #[allow(clippy::enum_variant_names)]
 diff --git a/wie-core-arm/src/engine/arm32_cpu.rs b/wie-core-arm/src/engine/arm32_cpu.rs
-index 5dbad8ff..0b4afa87 100644
+index 5dbad8ff..6612e2e2 100644
 --- a/wie-core-arm/src/engine/arm32_cpu.rs
 +++ b/wie-core-arm/src/engine/arm32_cpu.rs
 @@ -1,15 +1,14 @@
@@ -633,10 +633,10 @@ index 5dbad8ff..0b4afa87 100644
 +    let get = |cpu: &Cpu, register| cpu.reg_get(Mode::User, register);
 +    match hook {
 +        EngineFastHook::Rgb565TransparentCopy { reverse, exit_pc } => {
-+            let count = get(cpu, reg::R4);
-+            let dst = get(cpu, reg::R1);
-+            let src = get(cpu, reg::R2);
-+            let transparent = get(cpu, reg::R3) as u16;
++            let count = get(cpu, 4);
++            let dst = get(cpu, 1);
++            let src = get(cpu, 2);
++            let transparent = get(cpu, 3) as u16;
 +            for i in 0..count {
 +                let pixel = memory.r16(src.wrapping_add(i * 2));
 +                if pixel != transparent {
@@ -645,16 +645,16 @@ index 5dbad8ff..0b4afa87 100644
 +                }
 +            }
 +            let bytes = count.wrapping_mul(2);
-+            cpu.reg_set(Mode::User, reg::R4, 0);
-+            cpu.reg_set(Mode::User, reg::R1, if reverse { dst.wrapping_sub(bytes) } else { dst.wrapping_add(bytes) });
-+            cpu.reg_set(Mode::User, reg::R2, src.wrapping_add(bytes));
++            cpu.reg_set(Mode::User, 4, 0);
++            cpu.reg_set(Mode::User, 1, if reverse { dst.wrapping_sub(bytes) } else { dst.wrapping_add(bytes) });
++            cpu.reg_set(Mode::User, 2, src.wrapping_add(bytes));
 +            cpu.reg_set(Mode::User, reg::PC, exit_pc & !1);
 +        }
 +        EngineFastHook::Rgb565PaletteCopy { reverse, transparent, exit_pc } => {
-+            let palette = get(cpu, reg::R0);
-+            let count = get(cpu, reg::R4);
-+            let src = get(cpu, reg::R1);
-+            let dst = get(cpu, reg::R2);
++            let palette = get(cpu, 0);
++            let count = get(cpu, 4);
++            let src = get(cpu, 1);
++            let dst = get(cpu, 2);
 +            for i in 0..count {
 +                let index = memory.r8(src.wrapping_add(i)) as u32;
 +                if !transparent || index != 0 {
@@ -664,16 +664,16 @@ index 5dbad8ff..0b4afa87 100644
 +                }
 +            }
 +            let bytes = count.wrapping_mul(2);
-+            cpu.reg_set(Mode::User, reg::R4, 0);
-+            cpu.reg_set(Mode::User, reg::R1, src.wrapping_add(count));
-+            cpu.reg_set(Mode::User, reg::R2, if reverse { dst.wrapping_sub(bytes) } else { dst.wrapping_add(bytes) });
++            cpu.reg_set(Mode::User, 4, 0);
++            cpu.reg_set(Mode::User, 1, src.wrapping_add(count));
++            cpu.reg_set(Mode::User, 2, if reverse { dst.wrapping_sub(bytes) } else { dst.wrapping_add(bytes) });
 +            cpu.reg_set(Mode::User, reg::PC, exit_pc & !1);
 +        }
 +        EngineFastHook::Rgb565HalfBlendRow { exit_pc } => {
-+            let dst = get(cpu, reg::R4);
-+            let count = get(cpu, reg::R3);
++            let dst = get(cpu, 4);
++            let count = get(cpu, 3);
 +            let color_rb = get(cpu, 12);
-+            let color_g = get(cpu, reg::R7);
++            let color_g = get(cpu, 7);
 +            for i in 0..count {
 +                let address = dst.wrapping_add(i * 2);
 +                let old = memory.r16(address) as u32;
@@ -681,8 +681,8 @@ index 5dbad8ff..0b4afa87 100644
 +                    | (((old & 0x07e0).wrapping_add(color_g) >> 1) & 0x07e0);
 +                memory.w16(address, blended as u16);
 +            }
-+            cpu.reg_set(Mode::User, reg::R4, dst.wrapping_add(count.wrapping_mul(2)));
-+            cpu.reg_set(Mode::User, reg::R1, 0);
++            cpu.reg_set(Mode::User, 4, dst.wrapping_add(count.wrapping_mul(2)));
++            cpu.reg_set(Mode::User, 1, 0);
 +            cpu.reg_set(Mode::User, reg::PC, exit_pc & !1);
 +        }
 +    }
