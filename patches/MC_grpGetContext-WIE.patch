@@ -109,15 +109,18 @@ index ddd2fae2..4e4984d3 100644
  name = "Generic compiler library / inline copy patterns"
  
 diff --git a/wie-core-arm/src/binary_patches/hook.rs b/wie-core-arm/src/binary_patches/hook.rs
-index 8bd906c1..149ac9f8 100644
+index 8bd906c1..08ec54f8 100644
 --- a/wie-core-arm/src/binary_patches/hook.rs
 +++ b/wie-core-arm/src/binary_patches/hook.rs
-@@ -1,4 +1,4 @@
+@@ -1,6 +1,6 @@
 -use alloc::{collections::BTreeMap, format, string::ToString, sync::Arc, vec::Vec};
 +use alloc::{collections::BTreeMap, format, string::ToString, sync::Arc, vec, vec::Vec};
  
- use wie_util::{ByteWrite, Result, WieError, read_generic};
+-use wie_util::{ByteWrite, Result, WieError, read_generic};
++use wie_util::{ByteRead, ByteWrite, Result, WieError, read_generic};
  
+ use super::{Entry, PatternToken, scan_pattern};
+ use crate::{ArmCore, engine::ArmRegister, function::JumpTo, stdlib};
 @@ -24,6 +24,14 @@ pub enum HookKind {
      Strcpy,
      /// ABI: str=r0; returns length in R0 via LR.
