@@ -53,10 +53,10 @@ index 74584606..f75450ed 100644
      string.chars().map(|c| font.h_advance(font.scaled_glyph(c).id)).sum::<f32>()
  }
 diff --git a/wie-core-arm/data/binary_patches.toml b/wie-core-arm/data/binary_patches.toml
-index ddd2fae2..4e4984d3 100644
+index ddd2fae2..9f04ef20 100644
 --- a/wie-core-arm/data/binary_patches.toml
 +++ b/wie-core-arm/data/binary_patches.toml
-@@ -50,6 +50,51 @@
+@@ -50,6 +50,67 @@
  # patches/hooks is fatal (likely a stale entry against an updated binary);
  # generic (hash-less) entries warn and continue.
  
@@ -105,11 +105,27 @@ index ddd2fae2..4e4984d3 100644
 +pc = 0x10a6eb
 +exit_pc = 0x10a70b
 +
++[[entry.hook]]
++kind = "rgb565_palette_copy"
++pc = 0x108325
++
++[[entry.hook]]
++kind = "rgb565_palette_copy_transparent"
++pc = 0x108349
++
++[[entry.hook]]
++kind = "rgb565_palette_copy_reverse"
++pc = 0x108371
++
++[[entry.hook]]
++kind = "rgb565_palette_copy_reverse_transparent"
++pc = 0x108395
++
  [[entry]]
  name = "Generic compiler library / inline copy patterns"
  
 diff --git a/wie-core-arm/src/binary_patches/hook.rs b/wie-core-arm/src/binary_patches/hook.rs
-index 8bd906c1..08ec54f8 100644
+index 8bd906c1..214abe01 100644
 --- a/wie-core-arm/src/binary_patches/hook.rs
 +++ b/wie-core-arm/src/binary_patches/hook.rs
 @@ -1,6 +1,6 @@
@@ -121,7 +137,7 @@ index 8bd906c1..08ec54f8 100644
  
  use super::{Entry, PatternToken, scan_pattern};
  use crate::{ArmCore, engine::ArmRegister, function::JumpTo, stdlib};
-@@ -24,6 +24,14 @@ pub enum HookKind {
+@@ -24,6 +24,17 @@ pub enum HookKind {
      Strcpy,
      /// ABI: str=r0; returns length in R0 via LR.
      Strlen,
@@ -130,13 +146,16 @@ index 8bd906c1..08ec54f8 100644
 +    Rgb565TransparentCopy,
 +    /// Same ABI, but the destination pointer is decremented before each write.
 +    Rgb565TransparentCopyReverse,
++    /// ABI: object=r0, count=r1, dst=r2, palette indices=r3. Expands indexed
++    /// pixels through the object's RGB565 palette in one host operation.
++    Rgb565PaletteCopy { reverse: bool, transparent: bool },
 +    /// Replaces one row of a 50% RGB565 color blend. On entry r4 is the
 +    /// destination, r3 is the pixel count, ip/r7 contain the masked color.
 +    Rgb565HalfBlendRow { exit_pc: u32 },
      /// Replaces an inline byte-copy loop. Requires a down-counter `len` on the
      /// stack — zeroing it has to terminate the loop, so up-counter (`for i = 0;
      /// i < N`) shapes are not compatible.
-@@ -291,6 +299,75 @@ async fn handle_binary_patch_svc(core: &mut ArmCore, registry: &mut Registry) ->
+@@ -291,6 +302,112 @@ async fn handle_binary_patch_svc(core: &mut ArmCore, registry: &mut Registry) ->
              core.inner.lock().engine.reg_write(ArmRegister::R0, len);
              Ok(JumpTo(lr))
          }
@@ -180,6 +199,43 @@ index 8bd906c1..08ec54f8 100644
 +            }
 +            Ok(JumpTo(lr))
 +        }
++        HookKind::Rgb565PaletteCopy { reverse, transparent } => {
++            let (object, count, dst, src) = {
++                let inner = core.inner.lock();
++                (
++                    inner.engine.reg_read(ArmRegister::R0),
++                    inner.engine.reg_read(ArmRegister::R1),
++                    inner.engine.reg_read(ArmRegister::R2),
++                    inner.engine.reg_read(ArmRegister::R3),
++                )
++            };
++            if count as i32 > 0 {
++                let palette_owner: u32 = read_generic(core, object.wrapping_add(4))?;
++                let palette: u32 = read_generic(core, palette_owner.wrapping_add(0x0c))?;
++                let byte_len = count
++                    .checked_mul(2)
++                    .ok_or_else(|| WieError::FatalError("RGB565 palette copy length overflow".to_string()))?;
++                let dst_start = if reverse { dst.wrapping_sub(byte_len) } else { dst };
++                let mut indices = vec![0u8; count as usize];
++                let mut palette_bytes = vec![0u8; 512];
++                let mut dst_bytes = vec![0u8; byte_len as usize];
++                core.read_bytes(src, &mut indices)?;
++                core.read_bytes(palette, &mut palette_bytes)?;
++                if transparent {
++                    core.read_bytes(dst_start, &mut dst_bytes)?;
++                }
++                for (i, index) in indices.into_iter().enumerate() {
++                    if transparent && index == 0 {
++                        continue;
++                    }
++                    let pi = index as usize * 2;
++                    let di = if reverse { (count as usize - 1 - i) * 2 } else { i * 2 };
++                    dst_bytes[di..di + 2].copy_from_slice(&palette_bytes[pi..pi + 2]);
++                }
++                core.write_bytes(dst_start, &dst_bytes)?;
++            }
++            Ok(JumpTo(lr))
++        }
 +        HookKind::Rgb565HalfBlendRow { exit_pc } => {
 +            let (dst, count, color_rb, color_g) = {
 +                let inner = core.inner.lock();
@@ -213,20 +269,24 @@ index 8bd906c1..08ec54f8 100644
              let r7 = core.inner.lock().engine.reg_read(ArmRegister::R7);
              let dst_slot = r7.wrapping_add(spec.dst_offset as u32);
 diff --git a/wie-core-arm/src/binary_patches/parser.rs b/wie-core-arm/src/binary_patches/parser.rs
-index 382d3354..70487f72 100644
+index 382d3354..c4feaf1d 100644
 --- a/wie-core-arm/src/binary_patches/parser.rs
 +++ b/wie-core-arm/src/binary_patches/parser.rs
-@@ -65,6 +65,9 @@ enum KindTag {
+@@ -65,6 +65,13 @@ enum KindTag {
      Strlen,
      InlineCopy,
      RegInlineCopy,
 +    Rgb565TransparentCopy,
 +    Rgb565TransparentCopyReverse,
 +    Rgb565HalfBlendRow,
++    Rgb565PaletteCopy,
++    Rgb565PaletteCopyTransparent,
++    Rgb565PaletteCopyReverse,
++    Rgb565PaletteCopyReverseTransparent,
  }
  
  impl RawEntry {
-@@ -233,6 +236,13 @@ fn pc_kind(raw: &RawHook, entry_name: &str) -> HookKind {
+@@ -233,6 +240,29 @@ fn pc_kind(raw: &RawHook, entry_name: &str) -> HookKind {
                  .unwrap_or_else(|| panic!("entry {entry_name}: inline_copy requires spill_back")),
          }),
          KindTag::RegInlineCopy => panic!("entry {entry_name}: reg_inline_copy must be pattern-based, not pc-based"),
@@ -237,14 +297,36 @@ index 382d3354..70487f72 100644
 +                .exit_pc
 +                .unwrap_or_else(|| panic!("entry {entry_name}: rgb565_half_blend_row requires exit_pc")),
 +        },
++        KindTag::Rgb565PaletteCopy => HookKind::Rgb565PaletteCopy {
++            reverse: false,
++            transparent: false,
++        },
++        KindTag::Rgb565PaletteCopyTransparent => HookKind::Rgb565PaletteCopy {
++            reverse: false,
++            transparent: true,
++        },
++        KindTag::Rgb565PaletteCopyReverse => HookKind::Rgb565PaletteCopy {
++            reverse: true,
++            transparent: false,
++        },
++        KindTag::Rgb565PaletteCopyReverseTransparent => HookKind::Rgb565PaletteCopy {
++            reverse: true,
++            transparent: true,
++        },
      }
  }
  
-@@ -278,6 +288,9 @@ fn pattern_template(raw: &RawHook, tokens: &[PatternToken], entry_name: &str) ->
+@@ -278,6 +308,15 @@ fn pattern_template(raw: &RawHook, tokens: &[PatternToken], entry_name: &str) ->
                      .unwrap_or_else(|| panic!("entry {entry_name}: inline_copy requires spill_back")),
              }
          }
-+        KindTag::Rgb565TransparentCopy | KindTag::Rgb565TransparentCopyReverse | KindTag::Rgb565HalfBlendRow => {
++        KindTag::Rgb565TransparentCopy
++        | KindTag::Rgb565TransparentCopyReverse
++        | KindTag::Rgb565HalfBlendRow
++        | KindTag::Rgb565PaletteCopy
++        | KindTag::Rgb565PaletteCopyTransparent
++        | KindTag::Rgb565PaletteCopyReverse
++        | KindTag::Rgb565PaletteCopyReverseTransparent => {
 +            panic!("entry {entry_name}: RGB565 hooks must be pc-based")
 +        }
      }
