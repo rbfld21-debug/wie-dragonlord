@@ -333,7 +333,7 @@ index 382d3354..c4feaf1d 100644
  }
  
 diff --git a/wie-core-arm/src/core.rs b/wie-core-arm/src/core.rs
-index db698839..6932616a 100644
+index db698839..9662ce87 100644
 --- a/wie-core-arm/src/core.rs
 +++ b/wie-core-arm/src/core.rs
 @@ -19,7 +19,10 @@ const GLOBAL_DATA_BASE: u32 = 0x7fff0000;
@@ -348,7 +348,7 @@ index db698839..6932616a 100644
  pub const RUN_FUNCTION_LR: u32 = 0x7f000000;
  pub const HEAP_BASE: u32 = 0x40000000;
  pub const HEAP_SIZE: u32 = 0x10000000;
-@@ -175,13 +178,23 @@ impl ArmCore {
+@@ -175,13 +178,27 @@ impl ArmCore {
          self.threads.lock().keys().cloned().collect()
      }
  
@@ -365,8 +365,12 @@ index db698839..6932616a 100644
 +        // Preserve both the category and the stub's r12 function id as
 +        // synthetic frames so profiles identify the actual hot API.
 +        let mut stack = match stop_reason {
-+            EngineStopReason::Svc { category, .. } => {
-+                let id = inner.engine.reg_read(ArmRegister::IP);
++            EngineStopReason::Svc { category, lr, .. } => {
++                let id = if *category == 0x80 {
++                    lr.wrapping_sub(2) | 1
++                } else {
++                    inner.engine.reg_read(ArmRegister::IP)
++                };
 +                vec![0xff00_0000 | (category & 0xff), 0xfe00_0000 | (id & 0x00ff_ffff)]
 +            }
 +            _ => vec![pc],
@@ -374,7 +378,7 @@ index db698839..6932616a 100644
          let mut r7 = inner.engine.reg_read(ArmRegister::R7);
          for _ in 0..PROFILE_MAX_STACK {
              // Thumb frame: [saved R7 | saved LR] at [r7].
-@@ -265,7 +278,7 @@ impl ArmCore {
+@@ -265,7 +282,7 @@ impl ArmCore {
                  (result.stop_reason, should_yield)
              };
  
@@ -383,7 +387,7 @@ index db698839..6932616a 100644
  
              let svc_step = if let EngineStopReason::Svc { lr, spsr, .. } = result {
                  // Leave exception mode before yielding: thread contexts do not save banked SVC registers.
-@@ -882,25 +895,25 @@ mod tests {
+@@ -882,25 +899,25 @@ mod tests {
      }
  
      #[test]
