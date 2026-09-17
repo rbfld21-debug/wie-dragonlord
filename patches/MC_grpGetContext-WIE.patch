@@ -53,10 +53,10 @@ index 74584606..f75450ed 100644
      string.chars().map(|c| font.h_advance(font.scaled_glyph(c).id)).sum::<f32>()
  }
 diff --git a/wie-core-arm/data/binary_patches.toml b/wie-core-arm/data/binary_patches.toml
-index ddd2fae2..826b3930 100644
+index ddd2fae2..4e4984d3 100644
 --- a/wie-core-arm/data/binary_patches.toml
 +++ b/wie-core-arm/data/binary_patches.toml
-@@ -50,6 +50,35 @@
+@@ -50,6 +50,51 @@
  # patches/hooks is fatal (likely a stale entry against an updated binary);
  # generic (hash-less) entries warn and continue.
  
@@ -89,8 +89,163 @@ index ddd2fae2..826b3930 100644
 +kind = "strlen"
 +pattern = "30 b5 03 23 03 40 04 1c 00 2b"
 +
++# Dragonlord's renderer spends most of its guest instruction budget in these
++# RGB565 loops. Their ABI is stable for this hash-keyed binary, so execute the
++# bulk pixel operations in the host instead of interpreting every Thumb op.
++[[entry.hook]]
++kind = "rgb565_transparent_copy"
++pc = 0x1083cd
++
++[[entry.hook]]
++kind = "rgb565_transparent_copy_reverse"
++pc = 0x108411
++
++[[entry.hook]]
++kind = "rgb565_half_blend_row"
++pc = 0x10a6eb
++exit_pc = 0x10a70b
++
  [[entry]]
  name = "Generic compiler library / inline copy patterns"
+ 
+diff --git a/wie-core-arm/src/binary_patches/hook.rs b/wie-core-arm/src/binary_patches/hook.rs
+index 8bd906c1..149ac9f8 100644
+--- a/wie-core-arm/src/binary_patches/hook.rs
++++ b/wie-core-arm/src/binary_patches/hook.rs
+@@ -1,4 +1,4 @@
+-use alloc::{collections::BTreeMap, format, string::ToString, sync::Arc, vec::Vec};
++use alloc::{collections::BTreeMap, format, string::ToString, sync::Arc, vec, vec::Vec};
+ 
+ use wie_util::{ByteWrite, Result, WieError, read_generic};
+ 
+@@ -24,6 +24,14 @@ pub enum HookKind {
+     Strcpy,
+     /// ABI: str=r0; returns length in R0 via LR.
+     Strlen,
++    /// ABI: object=r0, count=r1, dst=r2, src=r3. Copies RGB565 pixels except
++    /// the object's transparent color (vtable field +0x18).
++    Rgb565TransparentCopy,
++    /// Same ABI, but the destination pointer is decremented before each write.
++    Rgb565TransparentCopyReverse,
++    /// Replaces one row of a 50% RGB565 color blend. On entry r4 is the
++    /// destination, r3 is the pixel count, ip/r7 contain the masked color.
++    Rgb565HalfBlendRow { exit_pc: u32 },
+     /// Replaces an inline byte-copy loop. Requires a down-counter `len` on the
+     /// stack — zeroing it has to terminate the loop, so up-counter (`for i = 0;
+     /// i < N`) shapes are not compatible.
+@@ -291,6 +299,75 @@ async fn handle_binary_patch_svc(core: &mut ArmCore, registry: &mut Registry) ->
+             core.inner.lock().engine.reg_write(ArmRegister::R0, len);
+             Ok(JumpTo(lr))
+         }
++        HookKind::Rgb565TransparentCopy | HookKind::Rgb565TransparentCopyReverse => {
++            let (object, count, dst, src) = {
++                let inner = core.inner.lock();
++                (
++                    inner.engine.reg_read(ArmRegister::R0),
++                    inner.engine.reg_read(ArmRegister::R1),
++                    inner.engine.reg_read(ArmRegister::R2),
++                    inner.engine.reg_read(ArmRegister::R3),
++                )
++            };
++            if count as i32 > 0 {
++                let vtable: u32 = read_generic(core, object)?;
++                let transparent: u16 = read_generic(core, vtable.wrapping_add(0x18))?;
++                let byte_len = count
++                    .checked_mul(2)
++                    .ok_or_else(|| WieError::FatalError("RGB565 copy length overflow".to_string()))?;
++                let dst_start = if matches!(kind, HookKind::Rgb565TransparentCopyReverse) {
++                    dst.wrapping_sub(byte_len)
++                } else {
++                    dst
++                };
++                let mut src_bytes = vec![0u8; byte_len as usize];
++                let mut dst_bytes = vec![0u8; byte_len as usize];
++                core.read_bytes(src, &mut src_bytes)?;
++                core.read_bytes(dst_start, &mut dst_bytes)?;
++                for i in 0..count as usize {
++                    let pixel = u16::from_le_bytes([src_bytes[i * 2], src_bytes[i * 2 + 1]]);
++                    if pixel != transparent {
++                        let di = if matches!(kind, HookKind::Rgb565TransparentCopyReverse) {
++                            (count as usize - 1 - i) * 2
++                        } else {
++                            i * 2
++                        };
++                        dst_bytes[di..di + 2].copy_from_slice(&pixel.to_le_bytes());
++                    }
++                }
++                core.write_bytes(dst_start, &dst_bytes)?;
++            }
++            Ok(JumpTo(lr))
++        }
++        HookKind::Rgb565HalfBlendRow { exit_pc } => {
++            let (dst, count, color_rb, color_g) = {
++                let inner = core.inner.lock();
++                (
++                    inner.engine.reg_read(ArmRegister::R4),
++                    inner.engine.reg_read(ArmRegister::R3),
++                    inner.engine.reg_read(ArmRegister::IP),
++                    inner.engine.reg_read(ArmRegister::R7),
++                )
++            };
++            if count as i32 > 0 {
++                let byte_len = count
++                    .checked_mul(2)
++                    .ok_or_else(|| WieError::FatalError("RGB565 blend length overflow".to_string()))?;
++                let mut pixels = vec![0u8; byte_len as usize];
++                core.read_bytes(dst, &mut pixels)?;
++                for bytes in pixels.chunks_exact_mut(2) {
++                    let old = u16::from_le_bytes([bytes[0], bytes[1]]) as u32;
++                    let blended = (((old & 0xf81f).wrapping_add(color_rb) >> 1) & 0xf81f)
++                        | (((old & 0x07e0).wrapping_add(color_g) >> 1) & 0x07e0);
++                    bytes.copy_from_slice(&(blended as u16).to_le_bytes());
++                }
++                core.write_bytes(dst, &pixels)?;
++                let mut inner = core.inner.lock();
++                inner.engine.reg_write(ArmRegister::R4, dst.wrapping_add(byte_len));
++                inner.engine.reg_write(ArmRegister::R1, 0);
++            }
++            Ok(JumpTo(exit_pc))
++        }
+         HookKind::InlineCopy(spec) => {
+             let r7 = core.inner.lock().engine.reg_read(ArmRegister::R7);
+             let dst_slot = r7.wrapping_add(spec.dst_offset as u32);
+diff --git a/wie-core-arm/src/binary_patches/parser.rs b/wie-core-arm/src/binary_patches/parser.rs
+index 382d3354..70487f72 100644
+--- a/wie-core-arm/src/binary_patches/parser.rs
++++ b/wie-core-arm/src/binary_patches/parser.rs
+@@ -65,6 +65,9 @@ enum KindTag {
+     Strlen,
+     InlineCopy,
+     RegInlineCopy,
++    Rgb565TransparentCopy,
++    Rgb565TransparentCopyReverse,
++    Rgb565HalfBlendRow,
+ }
+ 
+ impl RawEntry {
+@@ -233,6 +236,13 @@ fn pc_kind(raw: &RawHook, entry_name: &str) -> HookKind {
+                 .unwrap_or_else(|| panic!("entry {entry_name}: inline_copy requires spill_back")),
+         }),
+         KindTag::RegInlineCopy => panic!("entry {entry_name}: reg_inline_copy must be pattern-based, not pc-based"),
++        KindTag::Rgb565TransparentCopy => HookKind::Rgb565TransparentCopy,
++        KindTag::Rgb565TransparentCopyReverse => HookKind::Rgb565TransparentCopyReverse,
++        KindTag::Rgb565HalfBlendRow => HookKind::Rgb565HalfBlendRow {
++            exit_pc: raw
++                .exit_pc
++                .unwrap_or_else(|| panic!("entry {entry_name}: rgb565_half_blend_row requires exit_pc")),
++        },
+     }
+ }
+ 
+@@ -278,6 +288,9 @@ fn pattern_template(raw: &RawHook, tokens: &[PatternToken], entry_name: &str) ->
+                     .unwrap_or_else(|| panic!("entry {entry_name}: inline_copy requires spill_back")),
+             }
+         }
++        KindTag::Rgb565TransparentCopy | KindTag::Rgb565TransparentCopyReverse | KindTag::Rgb565HalfBlendRow => {
++            panic!("entry {entry_name}: RGB565 hooks must be pc-based")
++        }
+     }
+ }
  
 diff --git a/wie-core-arm/src/core.rs b/wie-core-arm/src/core.rs
 index db698839..012ea3ac 100644
