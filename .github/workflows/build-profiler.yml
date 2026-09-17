@@ -20,6 +20,7 @@ jobs:
           git clone https://github.com/dlunch/wie.git source
           git -C source checkout 4924e28a93b0
           git -C source apply "$GITHUB_WORKSPACE/patches/MC_grpGetContext-WIE.patch"
+          mkdir -p source/wie-ktf/examples
           cp tools/dragonlord_profile.rs source/wie-ktf/examples/dragonlord_profile.rs
       - uses: dtolnay/rust-toolchain@stable
       - working-directory: source
