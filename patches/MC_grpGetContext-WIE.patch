@@ -131,10 +131,10 @@ index ddd2fae2..a97a7a1b 100644
  name = "Generic compiler library / inline copy patterns"
  
 diff --git a/wie-core-arm/src/binary_patches/hook.rs b/wie-core-arm/src/binary_patches/hook.rs
-index 8bd906c1..5cf35814 100644
+index 8bd906c1..cff5edf0 100644
 --- a/wie-core-arm/src/binary_patches/hook.rs
 +++ b/wie-core-arm/src/binary_patches/hook.rs
-@@ -1,6 +1,6 @@
+@@ -1,9 +1,9 @@
 -use alloc::{collections::BTreeMap, format, string::ToString, sync::Arc, vec::Vec};
 +use alloc::{collections::BTreeMap, format, string::ToString, sync::Arc, vec, vec::Vec};
  
@@ -142,7 +142,11 @@ index 8bd906c1..5cf35814 100644
 +use wie_util::{ByteRead, ByteWrite, Result, WieError, read_generic};
  
  use super::{Entry, PatternToken, scan_pattern};
- use crate::{ArmCore, engine::ArmRegister, function::JumpTo, stdlib};
+-use crate::{ArmCore, engine::ArmRegister, function::JumpTo, stdlib};
++use crate::{ArmCore, engine::{ArmRegister, EngineFastHook}, function::JumpTo, stdlib};
+ 
+ const BINARY_PATCH_SVC: u32 = 0x80;
+ 
 @@ -24,6 +24,17 @@ pub enum HookKind {
      Strcpy,
      /// ABI: str=r0; returns length in R0 via LR.
@@ -161,7 +165,35 @@ index 8bd906c1..5cf35814 100644
      /// Replaces an inline byte-copy loop. Requires a down-counter `len` on the
      /// stack — zeroing it has to terminate the loop, so up-counter (`for i = 0;
      /// i < N`) shapes are not compatible.
-@@ -291,6 +302,117 @@ async fn handle_binary_patch_svc(core: &mut ArmCore, registry: &mut Registry) ->
+@@ -196,6 +207,27 @@ pub fn apply_hooks(core: &mut ArmCore, entry_name: &str, hooks: &[Hook]) -> Resu
+         let patch_addr = hook.pc & !1;
+         let instruction: u16 = 0xdf00 | (BINARY_PATCH_SVC as u16 & 0xff);
+         core.write_bytes(patch_addr, &instruction.to_le_bytes())?;
++        let fast_hook = match hook.kind {
++            HookKind::Rgb565TransparentCopy { exit_pc } => Some(EngineFastHook::Rgb565TransparentCopy {
++                reverse: false,
++                exit_pc,
++            }),
++            HookKind::Rgb565TransparentCopyReverse { exit_pc } => Some(EngineFastHook::Rgb565TransparentCopy {
++                reverse: true,
++                exit_pc,
++            }),
++            HookKind::Rgb565PaletteCopy { reverse, transparent, exit_pc } => Some(EngineFastHook::Rgb565PaletteCopy {
++                reverse,
++                transparent,
++                exit_pc,
++            }),
++            HookKind::Rgb565HalfBlendRow { exit_pc } => Some(EngineFastHook::Rgb565HalfBlendRow { exit_pc }),
++            _ => None,
++        };
++        if let Some(fast_hook) = fast_hook {
++            let installed = core.inner.lock().engine.install_fast_hook(patch_addr, fast_hook);
++            tracing::info!("Engine fast hook at {patch_addr:#x}: installed={installed}");
++        }
+         tracing::info!("Hook installed at {:#x}: {:?}", hook.pc, hook.kind);
+     }
+     if !hooks.is_empty() {
+@@ -291,6 +323,117 @@ async fn handle_binary_patch_svc(core: &mut ArmCore, registry: &mut Registry) ->
              core.inner.lock().engine.reg_write(ArmRegister::R0, len);
              Ok(JumpTo(lr))
          }
@@ -444,19 +476,62 @@ index db698839..9662ce87 100644
      }
  
      #[test]
+diff --git a/wie-core-arm/src/engine.rs b/wie-core-arm/src/engine.rs
+index a756777e..ae3001fc 100644
+--- a/wie-core-arm/src/engine.rs
++++ b/wie-core-arm/src/engine.rs
+@@ -18,6 +18,13 @@ pub struct EngineRunResult {
+     pub instructions_executed: u32,
+ }
+ 
++#[derive(Debug, Clone, Copy)]
++pub enum EngineFastHook {
++    Rgb565TransparentCopy { reverse: bool, exit_pc: u32 },
++    Rgb565PaletteCopy { reverse: bool, transparent: bool, exit_pc: u32 },
++    Rgb565HalfBlendRow { exit_pc: u32 },
++}
++
+ pub trait ArmEngine: Send + AsAny {
+     fn run(&mut self, end: u32, count: u32) -> Result<EngineRunResult>;
+     fn reg_write(&mut self, reg: ArmRegister, value: u32);
+@@ -26,6 +33,9 @@ pub trait ArmEngine: Send + AsAny {
+     fn mem_write(&mut self, address: u32, data: &[u8]) -> Result<()>;
+     fn mem_read(&mut self, address: u32, size: usize, result: &mut [u8]) -> Result<usize>;
+     fn is_mapped(&self, address: u32, size: usize) -> bool;
++    fn install_fast_hook(&mut self, _pc: u32, _hook: EngineFastHook) -> bool {
++        false
++    }
+ }
+ 
+ #[allow(clippy::enum_variant_names)]
 diff --git a/wie-core-arm/src/engine/arm32_cpu.rs b/wie-core-arm/src/engine/arm32_cpu.rs
-index 5dbad8ff..47486bf0 100644
+index 5dbad8ff..0b4afa87 100644
 --- a/wie-core-arm/src/engine/arm32_cpu.rs
 +++ b/wie-core-arm/src/engine/arm32_cpu.rs
-@@ -1,6 +1,4 @@
- use alloc::{boxed::Box, format, vec};
+@@ -1,15 +1,14 @@
+-use alloc::{boxed::Box, format, vec};
 -use core::cell::RefCell;
 -
++use alloc::{boxed::Box, collections::BTreeMap, format, vec};
  use arm32_cpu::{Cpu, Memory, Mode, reg};
  
  use wie_util::{Result, WieError};
-@@ -19,39 +17,37 @@ impl Arm32CpuEngine {
+ 
+-use crate::engine::{ArmEngine, ArmRegister, EngineRunResult, EngineStopReason, MemoryPermission};
++use crate::engine::{ArmEngine, ArmRegister, EngineFastHook, EngineRunResult, EngineStopReason, MemoryPermission};
+ 
+ pub struct Arm32CpuEngine {
+     cpu: Cpu,
+     mem: EmulatedMemory,
++    fast_hooks: BTreeMap<u32, EngineFastHook>,
+ }
+ 
+ impl Arm32CpuEngine {
+@@ -17,41 +16,46 @@ impl Arm32CpuEngine {
+         Self {
+             cpu: Cpu::new(),
              mem: EmulatedMemory::new(),
++            fast_hooks: BTreeMap::new(),
          }
      }
 -
@@ -492,6 +567,7 @@ index 5dbad8ff..47486bf0 100644
 +        // in WebAssembly, where this loop is the emulator's hottest path.
 +        let cpu = &mut self.cpu;
 +        let mut memory = self.mem.as_arm32cpu_memory();
++        let fast_hooks = &self.fast_hooks;
          let stop_reason = loop {
 -            let pc = self.cpu.reg_get(Mode::User, reg::PC);
 -
@@ -512,6 +588,11 @@ index 5dbad8ff..47486bf0 100644
 +                        "Invalid Thumb SVC instruction {instruction:#06x} at {svc_address:#x}"
 +                    )));
 +                }
++                if let Some(hook) = fast_hooks.get(&svc_address).copied() {
++                    run_fast_hook(cpu, &mut memory, hook)?;
++                    cpu.reg_set(Mode::User, reg::CPSR, spsr);
++                    continue;
++                }
 +                break EngineStopReason::Svc {
 +                    category: instruction as u32 & 0xff,
 +                    lr,
@@ -520,7 +601,7 @@ index 5dbad8ff..47486bf0 100644
              }
  
              if pc < 0x1000 {
-@@ -66,14 +62,12 @@ impl ArmEngine for Arm32CpuEngine {
+@@ -66,14 +70,12 @@ impl ArmEngine for Arm32CpuEngine {
                  break EngineStopReason::Yield;
              }
  
@@ -537,7 +618,82 @@ index 5dbad8ff..47486bf0 100644
                  return Err(WieError::InvalidMemoryAccess(x));
              }
          };
-@@ -232,19 +226,19 @@ impl EmulatedMemory {
+@@ -115,6 +117,74 @@ impl ArmEngine for Arm32CpuEngine {
+     fn is_mapped(&self, address: u32, size: usize) -> bool {
+         self.mem.is_mapped(address, size)
+     }
++
++    fn install_fast_hook(&mut self, pc: u32, hook: EngineFastHook) -> bool {
++        self.fast_hooks.insert(pc, hook);
++        true
++    }
++}
++
++fn run_fast_hook(cpu: &mut Cpu, memory: &mut Arm32CpuMemory<'_>, hook: EngineFastHook) -> Result<()> {
++    let get = |cpu: &Cpu, register| cpu.reg_get(Mode::User, register);
++    match hook {
++        EngineFastHook::Rgb565TransparentCopy { reverse, exit_pc } => {
++            let count = get(cpu, reg::R4);
++            let dst = get(cpu, reg::R1);
++            let src = get(cpu, reg::R2);
++            let transparent = get(cpu, reg::R3) as u16;
++            for i in 0..count {
++                let pixel = memory.r16(src.wrapping_add(i * 2));
++                if pixel != transparent {
++                    let address = if reverse { dst.wrapping_sub((i + 1) * 2) } else { dst.wrapping_add(i * 2) };
++                    memory.w16(address, pixel);
++                }
++            }
++            let bytes = count.wrapping_mul(2);
++            cpu.reg_set(Mode::User, reg::R4, 0);
++            cpu.reg_set(Mode::User, reg::R1, if reverse { dst.wrapping_sub(bytes) } else { dst.wrapping_add(bytes) });
++            cpu.reg_set(Mode::User, reg::R2, src.wrapping_add(bytes));
++            cpu.reg_set(Mode::User, reg::PC, exit_pc & !1);
++        }
++        EngineFastHook::Rgb565PaletteCopy { reverse, transparent, exit_pc } => {
++            let palette = get(cpu, reg::R0);
++            let count = get(cpu, reg::R4);
++            let src = get(cpu, reg::R1);
++            let dst = get(cpu, reg::R2);
++            for i in 0..count {
++                let index = memory.r8(src.wrapping_add(i)) as u32;
++                if !transparent || index != 0 {
++                    let pixel = memory.r16(palette.wrapping_add(index * 2));
++                    let address = if reverse { dst.wrapping_sub((i + 1) * 2) } else { dst.wrapping_add(i * 2) };
++                    memory.w16(address, pixel);
++                }
++            }
++            let bytes = count.wrapping_mul(2);
++            cpu.reg_set(Mode::User, reg::R4, 0);
++            cpu.reg_set(Mode::User, reg::R1, src.wrapping_add(count));
++            cpu.reg_set(Mode::User, reg::R2, if reverse { dst.wrapping_sub(bytes) } else { dst.wrapping_add(bytes) });
++            cpu.reg_set(Mode::User, reg::PC, exit_pc & !1);
++        }
++        EngineFastHook::Rgb565HalfBlendRow { exit_pc } => {
++            let dst = get(cpu, reg::R4);
++            let count = get(cpu, reg::R3);
++            let color_rb = get(cpu, 12);
++            let color_g = get(cpu, reg::R7);
++            for i in 0..count {
++                let address = dst.wrapping_add(i * 2);
++                let old = memory.r16(address) as u32;
++                let blended = (((old & 0xf81f).wrapping_add(color_rb) >> 1) & 0xf81f)
++                    | (((old & 0x07e0).wrapping_add(color_g) >> 1) & 0x07e0);
++                memory.w16(address, blended as u16);
++            }
++            cpu.reg_set(Mode::User, reg::R4, dst.wrapping_add(count.wrapping_mul(2)));
++            cpu.reg_set(Mode::User, reg::R1, 0);
++            cpu.reg_set(Mode::User, reg::PC, exit_pc & !1);
++        }
++    }
++    if let Some(address) = memory.memory_error() {
++        return Err(WieError::InvalidMemoryAccess(address));
++    }
++    Ok(())
+ }
+ 
+ impl ArmRegister {
+@@ -232,19 +302,19 @@ impl EmulatedMemory {
  
  struct Arm32CpuMemory<'a> {
      emulated_memory: &'a mut EmulatedMemory,
@@ -560,7 +716,7 @@ index 5dbad8ff..47486bf0 100644
      }
  
      fn get_page(&mut self, addr: u32) -> Option<&mut [u8; PAGE_SIZE]> {
-@@ -254,7 +248,7 @@ impl<'a> Arm32CpuMemory<'a> {
+@@ -254,7 +324,7 @@ impl<'a> Arm32CpuMemory<'a> {
          if let Some(x) = page_data {
              Some(x)
          } else {
