@@ -192,6 +192,59 @@ index 74584606..f75450ed 100644
  
      string.chars().map(|c| font.h_advance(font.scaled_glyph(c).id)).sum::<f32>()
  }
+diff --git a/wie-backend/src/system/audio.rs b/wie-backend/src/system/audio.rs
+index 1a34896b..a2541ade 100644
+--- a/wie-backend/src/system/audio.rs
++++ b/wie-backend/src/system/audio.rs
+@@ -84,7 +84,9 @@ fn convert_smaf_events(events: Vec<(usize, SmafEvent)>) -> AudioSequence {
+                 },
+                 SmafEvent::MidiNoteOn { channel, note, velocity } => AudioEventData::Midi(vec![0x90 | channel, note, velocity]),
+                 SmafEvent::MidiNoteOff { channel, note, velocity } => AudioEventData::Midi(vec![0x80 | channel, note, velocity]),
+-                SmafEvent::MidiProgramChange { channel, program } => AudioEventData::Midi(vec![0xc0 | channel, program]),
++                SmafEvent::MidiProgramChange { channel, program } => {
++                    AudioEventData::Midi(vec![0xc0 | channel, gm_fallback_program(program)])
++                }
+                 SmafEvent::MidiControlChange { channel, control, value } => AudioEventData::Midi(vec![0xb0 | channel, control, value]),
+                 SmafEvent::MidiPitchBend { channel, value } => {
+                     AudioEventData::Midi(vec![0xe0 | channel, (value & 0x7f) as u8, ((value >> 7) & 0x7f) as u8])
+@@ -100,6 +102,16 @@ fn convert_smaf_events(events: Vec<(usize, SmafEvent)>) -> AudioSequence {
+     AudioSequence { duration, events }
+ }
+ 
++fn gm_fallback_program(program: u8) -> u8 {
++    // SMAF files can redefine the upper voice slots with Yamaha FM SysEx.
++    // General MIDI synths do not understand those definitions and interpret
++    // the same slots as sound effects (woodblock, taiko, reverse cymbal, ...),
++    // producing loud noise over an otherwise recognizable song. Keep the
++    // dedicated percussion channel intact, but render custom melodic voices
++    // with a neutral string-ensemble fallback.
++    if program >= 112 { 48 } else { program }
++}
++
+ #[cfg(test)]
+ mod tests {
+     extern crate std;
+@@ -109,11 +121,19 @@ mod tests {
+ 
+     use smaf_player::SmafEvent;
+ 
+-    use super::{Audio, convert_smaf_events};
++    use super::{Audio, convert_smaf_events, gm_fallback_program};
+     use crate::{AudioCommand, AudioEventData, AudioSequence, AudioSink, TimedAudioEvent};
+ 
+     struct RecordingSink(Arc<Mutex<Vec<AudioCommand>>>);
+ 
++    #[test]
++    fn maps_smaf_custom_voice_slots_away_from_general_midi_sound_effects() {
++        assert_eq!(gm_fallback_program(111), 111);
++        assert_eq!(gm_fallback_program(112), 48);
++        assert_eq!(gm_fallback_program(119), 48);
++        assert_eq!(gm_fallback_program(127), 48);
++    }
++
+     impl AudioSink for RecordingSink {
+         fn send(&self, command: AudioCommand) {
+             self.0.lock().unwrap().push(command);
 diff --git a/wie-core-arm/data/binary_patches.toml b/wie-core-arm/data/binary_patches.toml
 index ddd2fae2..a97a7a1b 100644
 --- a/wie-core-arm/data/binary_patches.toml
