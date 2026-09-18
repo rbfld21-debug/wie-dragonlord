@@ -74,7 +74,6 @@ fn main() -> Result<()> {
     press(&mut emulator, KeyCode::DOWN, 2)?;
     let after_down = capture.lock().clone();
     save_ppm("dragonlord-after-down.ppm", &after_down)?;
-    press(&mut emulator, KeyCode::UP, 2)?;
     press(&mut emulator, KeyCode::OK, 2)?;
     let after_ok = capture.lock().clone();
     save_ppm("dragonlord-after-ok.ppm", &after_ok)?;
