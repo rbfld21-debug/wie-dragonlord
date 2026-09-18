@@ -1,0 +1,1578 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index 173f29c0..cc153b58 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -27,6 +27,9 @@ opt-level = 1
+ 
+ [profile.release]
+ lto = true
++codegen-units = 1
++opt-level = 3
++panic = "abort"
+ 
+ [workspace.package]
+ version = "0.1.4"
+diff --git a/test-utils/src/platform.rs b/test-utils/src/platform.rs
+index 88ee9255..9c85a63b 100644
+--- a/test-utils/src/platform.rs
++++ b/test-utils/src/platform.rs
+@@ -8,7 +8,7 @@ use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+ 
+ use hashbrown::HashMap;
+ use spin::Mutex;
+-use wie_backend::{AudioSink, Database, DatabaseRepository, Filesystem, Font, Instant, Platform, RecordId, Screen, canvas::Image};
++use wie_backend::{AudioCommand, AudioSink, Database, DatabaseRepository, Filesystem, Font, Instant, Platform, RecordId, Screen, canvas::Image};
+ use wie_util::Result;
+ 
+ use crate::filesystem::MemoryFilesystem;
+@@ -46,6 +46,7 @@ pub struct TestPlatform {
+     db: Arc<MemoryDatabaseRepository>,
+     font: Font,
+     clock: Option<TestClock>,
++    audio_capture: Option<Arc<Mutex<Vec<AudioCommand>>>>,
+ }
+ 
+ impl Default for TestPlatform {
+@@ -63,6 +64,7 @@ impl TestPlatform {
+             db: Arc::new(MemoryDatabaseRepository::default()),
+             font: Font::try_from_static(include_bytes!("../../assets/neodgm.ttf")).unwrap(),
+             clock: None,
++            audio_capture: None,
+         }
+     }
+ 
+@@ -77,6 +79,7 @@ impl TestPlatform {
+             db: Arc::new(MemoryDatabaseRepository::default()),
+             font: Font::try_from_static(include_bytes!("../../assets/neodgm.ttf")).unwrap(),
+             clock: None,
++            audio_capture: None,
+         }
+     }
+ 
+@@ -88,6 +91,35 @@ impl TestPlatform {
+             db: Arc::new(MemoryDatabaseRepository::default()),
+             font: Font::try_from_static(include_bytes!("../../assets/neodgm.ttf")).unwrap(),
+             clock: Some(clock),
++            audio_capture: None,
++        }
++    }
++
++    pub fn with_screen_capture(capture: Arc<Mutex<Vec<u32>>>, event_handler: impl Fn(TestPlatformEvent) + Sync + Send + 'static) -> Self {
++        Self {
++            screen: TestScreen::with_capture(capture),
++            event_handler: Some(Box::new(event_handler)),
++            fs: Arc::new(MemoryFilesystem::default()),
++            db: Arc::new(MemoryDatabaseRepository::default()),
++            font: Font::try_from_static(include_bytes!("../../assets/neodgm.ttf")).unwrap(),
++            clock: None,
++            audio_capture: None,
++        }
++    }
++
++    pub fn with_screen_and_audio_capture(
++        capture: Arc<Mutex<Vec<u32>>>,
++        audio_capture: Arc<Mutex<Vec<AudioCommand>>>,
++        event_handler: impl Fn(TestPlatformEvent) + Sync + Send + 'static,
++    ) -> Self {
++        Self {
++            screen: TestScreen::with_capture(capture),
++            event_handler: Some(Box::new(event_handler)),
++            fs: Arc::new(MemoryFilesystem::default()),
++            db: Arc::new(MemoryDatabaseRepository::default()),
++            font: Font::try_from_static(include_bytes!("../../assets/neodgm.ttf")).unwrap(),
++            clock: None,
++            audio_capture: Some(audio_capture),
+         }
+     }
+ }
+@@ -119,7 +151,7 @@ impl Platform for TestPlatform {
+     }
+ 
+     fn audio_sink(&self) -> Box<dyn AudioSink> {
+-        Box::new(TestAudioSink)
++        Box::new(TestAudioSink(self.audio_capture.clone()))
+     }
+ 
+     fn write_stdout(&self, buf: &[u8]) {
+@@ -223,15 +255,20 @@ impl Database for MemoryDatabase {
+     }
+ }
+ 
+-pub struct TestAudioSink;
++pub struct TestAudioSink(Option<Arc<Mutex<Vec<AudioCommand>>>>);
+ 
+ impl AudioSink for TestAudioSink {
+-    fn send(&self, _command: wie_backend::AudioCommand) {}
++    fn send(&self, command: AudioCommand) {
++        if let Some(capture) = &self.0 {
++            capture.lock().push(command);
++        }
++    }
+ }
+ 
+ pub struct TestScreen {
+     width: AtomicU32,
+     height: AtomicU32,
++    capture: Option<Arc<Mutex<Vec<u32>>>>,
+ }
+ 
+ impl Default for TestScreen {
+@@ -239,6 +276,17 @@ impl Default for TestScreen {
+         Self {
+             width: AtomicU32::new(320),
+             height: AtomicU32::new(240),
++            capture: None,
++        }
++    }
++}
++
++impl TestScreen {
++    fn with_capture(capture: Arc<Mutex<Vec<u32>>>) -> Self {
++        Self {
++            width: AtomicU32::new(320),
++            height: AtomicU32::new(240),
++            capture: Some(capture),
+         }
+     }
+ }
+@@ -255,7 +303,15 @@ impl Screen for TestScreen {
+         Ok(())
+     }
+ 
+-    fn paint(&self, _image: &dyn Image) {}
++    fn paint(&self, image: &dyn Image) {
++        if let Some(capture) = &self.capture {
++            *capture.lock() = image
++                .colors()
++                .into_iter()
++                .map(|pixel| u32::from_be_bytes([pixel.a, pixel.r, pixel.g, pixel.b]))
++                .collect();
++        }
++    }
+ 
+     fn width(&self) -> u32 {
+         self.width.load(Ordering::SeqCst)
+diff --git a/wie-app/tauri.conf.json b/wie-app/tauri.conf.json
+index 591e936a..889bd284 100644
+--- a/wie-app/tauri.conf.json
++++ b/wie-app/tauri.conf.json
+@@ -1,7 +1,7 @@
+ {
+   "$schema": "https://schema.tauri.app/config/2",
+   "productName": "wie",
+-  "version": "0.1.4",
++  "version": "0.1.9",
+   "identifier": "net.dlunch.wie",
+   "build": {
+     "frontendDist": "../wie-web/dist",
+diff --git a/wie-backend/src/canvas.rs b/wie-backend/src/canvas.rs
+index 74584606..f75450ed 100644
+--- a/wie-backend/src/canvas.rs
++++ b/wie-backend/src/canvas.rs
+@@ -623,8 +623,11 @@ where
+     }
+ 
+     fn draw_text(&mut self, font: &Font, string: &str, x: i32, y: i32, text_alignment: TextAlignment, color: Color, clip: Clip) {
+-        let size = 10.0; // TODO
+-        let font = font.0.as_scaled(font.0.pt_to_px_scale(size).unwrap());
++        // Mobile APIs specify their bitmap-font size in screen pixels. Treating
++        // this as typographic points enlarges 10 px text to roughly 13.3 px,
++        // which makes KTF menu and dialogue lines overlap.
++        let size = 10.0;
++        let font = font.0.as_scaled(size);
+ 
+         let total_width = string.chars().map(|c| font.h_advance(font.scaled_glyph(c).id)).sum::<f32>();
+         let x = match text_alignment {
+@@ -941,7 +944,7 @@ pub fn encode_png(image: &dyn Image) -> Result<Vec<u8>> {
+ }
+ 
+ pub fn string_width(font: &Font, string: &str, pt_size: f32) -> f32 {
+-    let font = font.0.as_scaled(font.0.pt_to_px_scale(pt_size).unwrap());
++    let font = font.0.as_scaled(pt_size);
+ 
+     string.chars().map(|c| font.h_advance(font.scaled_glyph(c).id)).sum::<f32>()
+ }
+diff --git a/wie-backend/src/system/audio.rs b/wie-backend/src/system/audio.rs
+index 1a34896b..a2541ade 100644
+--- a/wie-backend/src/system/audio.rs
++++ b/wie-backend/src/system/audio.rs
+@@ -84,7 +84,9 @@ fn convert_smaf_events(events: Vec<(usize, SmafEvent)>) -> AudioSequence {
+                 },
+                 SmafEvent::MidiNoteOn { channel, note, velocity } => AudioEventData::Midi(vec![0x90 | channel, note, velocity]),
+                 SmafEvent::MidiNoteOff { channel, note, velocity } => AudioEventData::Midi(vec![0x80 | channel, note, velocity]),
+-                SmafEvent::MidiProgramChange { channel, program } => AudioEventData::Midi(vec![0xc0 | channel, program]),
++                SmafEvent::MidiProgramChange { channel, program } => {
++                    AudioEventData::Midi(vec![0xc0 | channel, gm_fallback_program(program)])
++                }
+                 SmafEvent::MidiControlChange { channel, control, value } => AudioEventData::Midi(vec![0xb0 | channel, control, value]),
+                 SmafEvent::MidiPitchBend { channel, value } => {
+                     AudioEventData::Midi(vec![0xe0 | channel, (value & 0x7f) as u8, ((value >> 7) & 0x7f) as u8])
+@@ -100,6 +102,16 @@ fn convert_smaf_events(events: Vec<(usize, SmafEvent)>) -> AudioSequence {
+     AudioSequence { duration, events }
+ }
+ 
++fn gm_fallback_program(program: u8) -> u8 {
++    // SMAF files can redefine the upper voice slots with Yamaha FM SysEx.
++    // General MIDI synths do not understand those definitions and interpret
++    // the same slots as sound effects (woodblock, taiko, reverse cymbal, ...),
++    // producing loud noise over an otherwise recognizable song. Keep the
++    // dedicated percussion channel intact, but render custom melodic voices
++    // with a neutral string-ensemble fallback.
++    if program >= 112 { 48 } else { program }
++}
++
+ #[cfg(test)]
+ mod tests {
+     extern crate std;
+@@ -109,11 +121,19 @@ mod tests {
+ 
+     use smaf_player::SmafEvent;
+ 
+-    use super::{Audio, convert_smaf_events};
++    use super::{Audio, convert_smaf_events, gm_fallback_program};
+     use crate::{AudioCommand, AudioEventData, AudioSequence, AudioSink, TimedAudioEvent};
+ 
+     struct RecordingSink(Arc<Mutex<Vec<AudioCommand>>>);
+ 
++    #[test]
++    fn maps_smaf_custom_voice_slots_away_from_general_midi_sound_effects() {
++        assert_eq!(gm_fallback_program(111), 111);
++        assert_eq!(gm_fallback_program(112), 48);
++        assert_eq!(gm_fallback_program(119), 48);
++        assert_eq!(gm_fallback_program(127), 48);
++    }
++
+     impl AudioSink for RecordingSink {
+         fn send(&self, command: AudioCommand) {
+             self.0.lock().unwrap().push(command);
+diff --git a/wie-core-arm/data/binary_patches.toml b/wie-core-arm/data/binary_patches.toml
+index ddd2fae2..a97a7a1b 100644
+--- a/wie-core-arm/data/binary_patches.toml
++++ b/wie-core-arm/data/binary_patches.toml
+@@ -50,6 +50,73 @@
+ # patches/hooks is fatal (likely a stale entry against an updated binary);
+ # generic (hash-less) entries warn and continue.
+ 
++[[entry]]
++name = "Dragonlord retired carrier updater (v4 archive)"
++hash = "5c0b57227d626ec9c75bc31c2e694b60"
++
++# The shipped resources are already complete. Clear the obsolete carrier
++# update-required flag inside the original initializer, after its framebuffer
++# and resource state have been constructed. Skipping the initializer itself
++# leaves the title on a permanent white frame.
++[[entry.patch]]
++pc = 0x10c8ea
++expect = "1a 78"
++bytes = "1f 70"
++
++[[entry.hook]]
++kind = "memcpy"
++pattern = "78 47 00 00 01 40 2d e9 03 00 52 e3"
++
++[[entry.hook]]
++kind = "memset"
++pattern = "78 47 00 00 01 40 2d e9 04 00 52 e3"
++
++[[entry.hook]]
++kind = "strcpy"
++pattern = "70 b5 0b 1c 03 43 03 22 13 40 04 1c"
++
++[[entry.hook]]
++kind = "strlen"
++pattern = "30 b5 03 23 03 40 04 1c 00 2b"
++
++# Dragonlord's renderer spends most of its guest instruction budget in these
++# RGB565 loops. Their ABI is stable for this hash-keyed binary, so execute the
++# bulk pixel operations in the host instead of interpreting every Thumb op.
++[[entry.hook]]
++kind = "rgb565_transparent_copy"
++pc = 0x1083e3
++exit_pc = 0x1083f5
++
++[[entry.hook]]
++kind = "rgb565_transparent_copy_reverse"
++pc = 0x108427
++exit_pc = 0x108439
++
++[[entry.hook]]
++kind = "rgb565_half_blend_row"
++pc = 0x10a6eb
++exit_pc = 0x10a70b
++
++[[entry.hook]]
++kind = "rgb565_palette_copy"
++pc = 0x108333
++exit_pc = 0x108345
++
++[[entry.hook]]
++kind = "rgb565_palette_copy_transparent"
++pc = 0x108357
++exit_pc = 0x10836d
++
++[[entry.hook]]
++kind = "rgb565_palette_copy_reverse"
++pc = 0x10837f
++exit_pc = 0x108391
++
++[[entry.hook]]
++kind = "rgb565_palette_copy_reverse_transparent"
++pc = 0x1083a3
++exit_pc = 0x1083b9
++
+ [[entry]]
+ name = "Generic compiler library / inline copy patterns"
+ 
+diff --git a/wie-core-arm/src/binary_patches/hook.rs b/wie-core-arm/src/binary_patches/hook.rs
+index 8bd906c1..df69fd70 100644
+--- a/wie-core-arm/src/binary_patches/hook.rs
++++ b/wie-core-arm/src/binary_patches/hook.rs
+@@ -1,9 +1,9 @@
+-use alloc::{collections::BTreeMap, format, string::ToString, sync::Arc, vec::Vec};
++use alloc::{collections::BTreeMap, format, string::ToString, sync::Arc, vec, vec::Vec};
+ 
+-use wie_util::{ByteWrite, Result, WieError, read_generic};
++use wie_util::{ByteRead, ByteWrite, Result, WieError, read_generic};
+ 
+ use super::{Entry, PatternToken, scan_pattern};
+-use crate::{ArmCore, engine::ArmRegister, function::JumpTo, stdlib};
++use crate::{ArmCore, engine::{ArmRegister, EngineFastHook}, function::JumpTo, stdlib};
+ 
+ const BINARY_PATCH_SVC: u32 = 0x80;
+ 
+@@ -24,6 +24,17 @@ pub enum HookKind {
+     Strcpy,
+     /// ABI: str=r0; returns length in R0 via LR.
+     Strlen,
++    /// ABI: object=r0, count=r1, dst=r2, src=r3. Copies RGB565 pixels except
++    /// the object's transparent color (vtable field +0x18).
++    Rgb565TransparentCopy { exit_pc: u32 },
++    /// Same ABI, but the destination pointer is decremented before each write.
++    Rgb565TransparentCopyReverse { exit_pc: u32 },
++    /// ABI: object=r0, count=r1, dst=r2, palette indices=r3. Expands indexed
++    /// pixels through the object's RGB565 palette in one host operation.
++    Rgb565PaletteCopy { reverse: bool, transparent: bool, exit_pc: u32 },
++    /// Replaces one row of a 50% RGB565 color blend. On entry r4 is the
++    /// destination, r3 is the pixel count, ip/r7 contain the masked color.
++    Rgb565HalfBlendRow { exit_pc: u32 },
+     /// Replaces an inline byte-copy loop. Requires a down-counter `len` on the
+     /// stack — zeroing it has to terminate the loop, so up-counter (`for i = 0;
+     /// i < N`) shapes are not compatible.
+@@ -196,6 +207,29 @@ pub fn apply_hooks(core: &mut ArmCore, entry_name: &str, hooks: &[Hook]) -> Resu
+         let patch_addr = hook.pc & !1;
+         let instruction: u16 = 0xdf00 | (BINARY_PATCH_SVC as u16 & 0xff);
+         core.write_bytes(patch_addr, &instruction.to_le_bytes())?;
++        let fast_hook = match hook.kind {
++            HookKind::Memcpy => Some(EngineFastHook::Memcpy),
++            HookKind::Memset => Some(EngineFastHook::Memset),
++            HookKind::Rgb565TransparentCopy { exit_pc } => Some(EngineFastHook::Rgb565TransparentCopy {
++                reverse: false,
++                exit_pc,
++            }),
++            HookKind::Rgb565TransparentCopyReverse { exit_pc } => Some(EngineFastHook::Rgb565TransparentCopy {
++                reverse: true,
++                exit_pc,
++            }),
++            HookKind::Rgb565PaletteCopy { reverse, transparent, exit_pc } => Some(EngineFastHook::Rgb565PaletteCopy {
++                reverse,
++                transparent,
++                exit_pc,
++            }),
++            HookKind::Rgb565HalfBlendRow { exit_pc } => Some(EngineFastHook::Rgb565HalfBlendRow { exit_pc }),
++            _ => None,
++        };
++        if let Some(fast_hook) = fast_hook {
++            let installed = core.inner.lock().engine.install_fast_hook(patch_addr, fast_hook);
++            tracing::info!("Engine fast hook at {patch_addr:#x}: installed={installed}");
++        }
+         tracing::info!("Hook installed at {:#x}: {:?}", hook.pc, hook.kind);
+     }
+     if !hooks.is_empty() {
+@@ -291,6 +325,117 @@ async fn handle_binary_patch_svc(core: &mut ArmCore, registry: &mut Registry) ->
+             core.inner.lock().engine.reg_write(ArmRegister::R0, len);
+             Ok(JumpTo(lr))
+         }
++        HookKind::Rgb565TransparentCopy { exit_pc } | HookKind::Rgb565TransparentCopyReverse { exit_pc } => {
++            let (count, dst, src, transparent) = {
++                let inner = core.inner.lock();
++                (
++                    inner.engine.reg_read(ArmRegister::R4),
++                    inner.engine.reg_read(ArmRegister::R1),
++                    inner.engine.reg_read(ArmRegister::R2),
++                    inner.engine.reg_read(ArmRegister::R3) as u16,
++                )
++            };
++            if count as i32 > 0 {
++                let byte_len = count
++                    .checked_mul(2)
++                    .ok_or_else(|| WieError::FatalError("RGB565 copy length overflow".to_string()))?;
++                let reverse = matches!(kind, HookKind::Rgb565TransparentCopyReverse { .. });
++                let dst_start = if reverse {
++                    dst.wrapping_sub(byte_len)
++                } else {
++                    dst
++                };
++                let mut src_bytes = vec![0u8; byte_len as usize];
++                let mut dst_bytes = vec![0u8; byte_len as usize];
++                core.read_bytes(src, &mut src_bytes)?;
++                core.read_bytes(dst_start, &mut dst_bytes)?;
++                for i in 0..count as usize {
++                    let pixel = u16::from_le_bytes([src_bytes[i * 2], src_bytes[i * 2 + 1]]);
++                    if pixel != transparent {
++                        let di = if reverse {
++                            (count as usize - 1 - i) * 2
++                        } else {
++                            i * 2
++                        };
++                        dst_bytes[di..di + 2].copy_from_slice(&pixel.to_le_bytes());
++                    }
++                }
++                core.write_bytes(dst_start, &dst_bytes)?;
++                let mut inner = core.inner.lock();
++                inner.engine.reg_write(ArmRegister::R4, 0);
++                inner.engine.reg_write(ArmRegister::R1, if reverse { dst_start } else { dst.wrapping_add(byte_len) });
++                inner.engine.reg_write(ArmRegister::R2, src.wrapping_add(byte_len));
++            }
++            Ok(JumpTo(exit_pc))
++        }
++        HookKind::Rgb565PaletteCopy { reverse, transparent, exit_pc } => {
++            let (palette, count, dst, src) = {
++                let inner = core.inner.lock();
++                (
++                    inner.engine.reg_read(ArmRegister::R0),
++                    inner.engine.reg_read(ArmRegister::R4),
++                    inner.engine.reg_read(ArmRegister::R2),
++                    inner.engine.reg_read(ArmRegister::R1),
++                )
++            };
++            if count as i32 > 0 {
++                let byte_len = count
++                    .checked_mul(2)
++                    .ok_or_else(|| WieError::FatalError("RGB565 palette copy length overflow".to_string()))?;
++                let dst_start = if reverse { dst.wrapping_sub(byte_len) } else { dst };
++                let mut indices = vec![0u8; count as usize];
++                let mut palette_bytes = vec![0u8; 512];
++                let mut dst_bytes = vec![0u8; byte_len as usize];
++                core.read_bytes(src, &mut indices)?;
++                core.read_bytes(palette, &mut palette_bytes)?;
++                if transparent {
++                    core.read_bytes(dst_start, &mut dst_bytes)?;
++                }
++                for (i, index) in indices.into_iter().enumerate() {
++                    if transparent && index == 0 {
++                        continue;
++                    }
++                    let pi = index as usize * 2;
++                    let di = if reverse { (count as usize - 1 - i) * 2 } else { i * 2 };
++                    dst_bytes[di..di + 2].copy_from_slice(&palette_bytes[pi..pi + 2]);
++                }
++                core.write_bytes(dst_start, &dst_bytes)?;
++                let mut inner = core.inner.lock();
++                inner.engine.reg_write(ArmRegister::R4, 0);
++                inner.engine.reg_write(ArmRegister::R1, src.wrapping_add(count));
++                inner.engine.reg_write(ArmRegister::R2, if reverse { dst_start } else { dst.wrapping_add(byte_len) });
++            }
++            Ok(JumpTo(exit_pc))
++        }
++        HookKind::Rgb565HalfBlendRow { exit_pc } => {
++            let (dst, count, color_rb, color_g) = {
++                let inner = core.inner.lock();
++                (
++                    inner.engine.reg_read(ArmRegister::R4),
++                    inner.engine.reg_read(ArmRegister::R3),
++                    inner.engine.reg_read(ArmRegister::IP),
++                    inner.engine.reg_read(ArmRegister::R7),
++                )
++            };
++            if count as i32 > 0 {
++                let byte_len = count
++                    .checked_mul(2)
++                    .ok_or_else(|| WieError::FatalError("RGB565 blend length overflow".to_string()))?;
++                let mut pixels = vec![0u8; byte_len as usize];
++                core.read_bytes(dst, &mut pixels)?;
++                for bytes in pixels.chunks_exact_mut(2) {
++                    let old = u16::from_le_bytes([bytes[0], bytes[1]]) as u32;
++                    let blended = (((old & 0xf81f).wrapping_add(color_rb) >> 1) & 0xf81f)
++                        | (((old & 0x07e0).wrapping_add(color_g) >> 1) & 0x07e0);
++                    bytes.copy_from_slice(&(blended as u16).to_le_bytes());
++                }
++                core.write_bytes(dst, &pixels)?;
++                let mut inner = core.inner.lock();
++                inner.engine.reg_write(ArmRegister::R4, dst.wrapping_add(byte_len));
++                inner.engine.reg_write(ArmRegister::R1, 0);
++            }
++            Ok(JumpTo(exit_pc))
++        }
+         HookKind::InlineCopy(spec) => {
+             let r7 = core.inner.lock().engine.reg_read(ArmRegister::R7);
+             let dst_slot = r7.wrapping_add(spec.dst_offset as u32);
+diff --git a/wie-core-arm/src/binary_patches/parser.rs b/wie-core-arm/src/binary_patches/parser.rs
+index 382d3354..1d469188 100644
+--- a/wie-core-arm/src/binary_patches/parser.rs
++++ b/wie-core-arm/src/binary_patches/parser.rs
+@@ -65,6 +65,13 @@ enum KindTag {
+     Strlen,
+     InlineCopy,
+     RegInlineCopy,
++    Rgb565TransparentCopy,
++    Rgb565TransparentCopyReverse,
++    Rgb565HalfBlendRow,
++    Rgb565PaletteCopy,
++    Rgb565PaletteCopyTransparent,
++    Rgb565PaletteCopyReverse,
++    Rgb565PaletteCopyReverseTransparent,
+ }
+ 
+ impl RawEntry {
+@@ -233,9 +240,44 @@ fn pc_kind(raw: &RawHook, entry_name: &str) -> HookKind {
+                 .unwrap_or_else(|| panic!("entry {entry_name}: inline_copy requires spill_back")),
+         }),
+         KindTag::RegInlineCopy => panic!("entry {entry_name}: reg_inline_copy must be pattern-based, not pc-based"),
++        KindTag::Rgb565TransparentCopy => HookKind::Rgb565TransparentCopy {
++            exit_pc: required_exit_pc(raw, entry_name),
++        },
++        KindTag::Rgb565TransparentCopyReverse => HookKind::Rgb565TransparentCopyReverse {
++            exit_pc: required_exit_pc(raw, entry_name),
++        },
++        KindTag::Rgb565HalfBlendRow => HookKind::Rgb565HalfBlendRow {
++            exit_pc: raw
++                .exit_pc
++                .unwrap_or_else(|| panic!("entry {entry_name}: rgb565_half_blend_row requires exit_pc")),
++        },
++        KindTag::Rgb565PaletteCopy => HookKind::Rgb565PaletteCopy {
++            reverse: false,
++            transparent: false,
++            exit_pc: required_exit_pc(raw, entry_name),
++        },
++        KindTag::Rgb565PaletteCopyTransparent => HookKind::Rgb565PaletteCopy {
++            reverse: false,
++            transparent: true,
++            exit_pc: required_exit_pc(raw, entry_name),
++        },
++        KindTag::Rgb565PaletteCopyReverse => HookKind::Rgb565PaletteCopy {
++            reverse: true,
++            transparent: false,
++            exit_pc: required_exit_pc(raw, entry_name),
++        },
++        KindTag::Rgb565PaletteCopyReverseTransparent => HookKind::Rgb565PaletteCopy {
++            reverse: true,
++            transparent: true,
++            exit_pc: required_exit_pc(raw, entry_name),
++        },
+     }
+ }
+ 
++fn required_exit_pc(raw: &RawHook, entry_name: &str) -> u32 {
++    raw.exit_pc.unwrap_or_else(|| panic!("entry {entry_name}: RGB565 loop hook requires exit_pc"))
++}
++
+ fn pattern_template(raw: &RawHook, tokens: &[PatternToken], entry_name: &str) -> PatternHookKind {
+     match raw.kind {
+         KindTag::Memcpy => PatternHookKind::Memcpy,
+@@ -278,6 +320,15 @@ fn pattern_template(raw: &RawHook, tokens: &[PatternToken], entry_name: &str) ->
+                     .unwrap_or_else(|| panic!("entry {entry_name}: inline_copy requires spill_back")),
+             }
+         }
++        KindTag::Rgb565TransparentCopy
++        | KindTag::Rgb565TransparentCopyReverse
++        | KindTag::Rgb565HalfBlendRow
++        | KindTag::Rgb565PaletteCopy
++        | KindTag::Rgb565PaletteCopyTransparent
++        | KindTag::Rgb565PaletteCopyReverse
++        | KindTag::Rgb565PaletteCopyReverseTransparent => {
++            panic!("entry {entry_name}: RGB565 hooks must be pc-based")
++        }
+     }
+ }
+ 
+diff --git a/wie-core-arm/src/core.rs b/wie-core-arm/src/core.rs
+index db698839..e84e6c24 100644
+--- a/wie-core-arm/src/core.rs
++++ b/wie-core-arm/src/core.rs
+@@ -9,7 +9,7 @@ use wie_util::{ByteRead, ByteWrite, Result, WieError, read_generic};
+ use crate::{
+     EmulatedFunction, ResultWriter, ThreadId,
+     context::ArmCoreContext,
+-    engine::{Arm32CpuEngine, ArmEngine, ArmRegister, DebugInner, DebuggedArm32CpuEngine, EngineStopReason, MemoryPermission},
++    engine::{Arm32CpuEngine, ArmEngine, ArmRegister, DebugInner, DebuggedArm32CpuEngine, EngineFastHook, EngineStopReason, MemoryPermission},
+     function::{RegisteredFunction, RegisteredFunctionHolder},
+     thread::ThreadState,
+     thread_wrapper::ArmCoreThreadWrapper,
+@@ -19,7 +19,10 @@ const GLOBAL_DATA_BASE: u32 = 0x7fff0000;
+ const FUNCTIONS_BASE: u32 = 0x71000000;
+ const FUNCTIONS_SIZE: usize = 0x10000;
+ const SVC_STUB_SIZE: u32 = 16;
+-const INSTRUCTIONS_PER_YIELD: u32 = 10_000;
++// ARM interpretation is the dominant cost in the WebAssembly build. Larger
++// slices avoid repeatedly unwinding and polling the async task graph while
++// still returning to the executor several times inside its time budget.
++const INSTRUCTIONS_PER_YIELD: u32 = 100_000;
+ pub const RUN_FUNCTION_LR: u32 = 0x7f000000;
+ pub const HEAP_BASE: u32 = 0x40000000;
+ pub const HEAP_SIZE: u32 = 0x10000000;
+@@ -175,13 +178,27 @@ impl ArmCore {
+         self.threads.lock().keys().cloned().collect()
+     }
+ 
+-    fn sample_profile(&self) {
++    fn sample_profile(&self, stop_reason: &EngineStopReason) {
+         let mut inner = self.inner.lock();
+         if inner.profile.is_none() {
+             return;
+         }
+         let pc = inner.engine.reg_read(ArmRegister::PC);
+-        let mut stack = vec![pc];
++        // An SVC stops at the exception vector (PC=0x08), which otherwise
++        // collapses every platform call into one useless profiler bucket.
++        // Preserve both the category and the stub's r12 function id as
++        // synthetic frames so profiles identify the actual hot API.
++        let mut stack = match stop_reason {
++            EngineStopReason::Svc { category, lr, .. } => {
++                let id = if *category == 0x80 {
++                    lr.wrapping_sub(2) | 1
++                } else {
++                    inner.engine.reg_read(ArmRegister::IP)
++                };
++                vec![0xff00_0000 | (category & 0xff), 0xfe00_0000 | (id & 0x00ff_ffff)]
++            }
++            _ => vec![pc],
++        };
+         let mut r7 = inner.engine.reg_read(ArmRegister::R7);
+         for _ in 0..PROFILE_MAX_STACK {
+             // Thumb frame: [saved R7 | saved LR] at [r7].
+@@ -265,7 +282,7 @@ impl ArmCore {
+                 (result.stop_reason, should_yield)
+             };
+ 
+-            self.sample_profile();
++            self.sample_profile(&result);
+ 
+             let svc_step = if let EngineStopReason::Svc { lr, spsr, .. } = result {
+                 // Leave exception mode before yielding: thread contexts do not save banked SVC registers.
+@@ -335,8 +352,15 @@ impl ArmCore {
+     }
+ 
+     pub fn make_svc_stub(&mut self, category: u32, id: impl Into<u32>) -> Result<u32> {
++        self.make_svc_stub_inner(category, id.into(), None)
++    }
++
++    pub fn make_fast_svc_stub(&mut self, category: u32, id: impl Into<u32>, hook: EngineFastHook) -> Result<u32> {
++        self.make_svc_stub_inner(category, id.into(), Some(hook))
++    }
++
++    fn make_svc_stub_inner(&mut self, category: u32, id: u32, fast_hook: Option<EngineFastHook>) -> Result<u32> {
+         let mut inner = self.inner.lock();
+-        let id = id.into();
+ 
+         if !inner.svc_handlers.contains_key(&category) {
+             return Err(WieError::FatalError(format!("Unknown SVC handler category: {category}")));
+@@ -366,6 +390,9 @@ impl ArmCore {
+         .chain(id.to_le_bytes())
+         .collect::<Vec<_>>();
+         inner.engine.mem_write(address, &stub)?;
++        if let Some(hook) = fast_hook {
++            inner.engine.install_fast_hook(address + 8, hook);
++        }
+ 
+         tracing::trace!("Register SVC stub at {address:#x}, category={category}, id={id}");
+ 
+@@ -882,25 +909,25 @@ mod tests {
+     }
+ 
+     #[test]
+-    fn yields_every_ten_thousand_instructions_across_svc() {
++    fn yields_every_instruction_slice_across_svc() {
+         let mut core = ArmCore::new(false, None).unwrap();
+         let calls = Arc::new(AtomicU32::new(0));
+         core.register_svc_handler(1, count_inline_svc, &calls).unwrap();
+-        let mut code = [0x01, 0x30, 0x01, 0xdf].repeat(10_000); // add r0, #1; svc #1
++        let mut code = [0x01, 0x30, 0x01, 0xdf].repeat(100_000); // add r0, #1; svc #1
+         code.extend_from_slice(&[0x70, 0x47]); // bx lr
+         core.load(&code, 0x1000, code.len()).unwrap();
+ 
+         let observer = core.clone();
+         let mut run = pin!(core.run_function::<u32>(0x1001, &[0]));
+         let mut cx = Context::from_waker(Waker::noop());
+-        for completed in [5_000, 10_000] {
++        for completed in [50_000, 100_000] {
+             assert!(run.as_mut().poll(&mut cx).is_pending());
+             assert_eq!(observer.read_param(0).unwrap(), completed);
+             assert_eq!(calls.load(Ordering::Relaxed), completed - 1);
+             assert_eq!(observer.save_context().cpsr & 0x3f, 0x3f);
+         }
+-        assert!(matches!(run.as_mut().poll(&mut cx), Poll::Ready(Ok(10_000))));
+-        assert_eq!(calls.load(Ordering::Relaxed), 10_000);
++        assert!(matches!(run.as_mut().poll(&mut cx), Poll::Ready(Ok(100_000))));
++        assert_eq!(calls.load(Ordering::Relaxed), 100_000);
+     }
+ 
+     #[test]
+diff --git a/wie-core-arm/src/engine.rs b/wie-core-arm/src/engine.rs
+index a756777e..442f5664 100644
+--- a/wie-core-arm/src/engine.rs
++++ b/wie-core-arm/src/engine.rs
+@@ -18,6 +18,16 @@ pub struct EngineRunResult {
+     pub instructions_executed: u32,
+ }
+ 
++#[derive(Debug, Clone, Copy)]
++pub enum EngineFastHook {
++    Memcpy,
++    Memset,
++    Rgb565FromRgbSvc,
++    Rgb565TransparentCopy { reverse: bool, exit_pc: u32 },
++    Rgb565PaletteCopy { reverse: bool, transparent: bool, exit_pc: u32 },
++    Rgb565HalfBlendRow { exit_pc: u32 },
++}
++
+ pub trait ArmEngine: Send + AsAny {
+     fn run(&mut self, end: u32, count: u32) -> Result<EngineRunResult>;
+     fn reg_write(&mut self, reg: ArmRegister, value: u32);
+@@ -26,6 +36,9 @@ pub trait ArmEngine: Send + AsAny {
+     fn mem_write(&mut self, address: u32, data: &[u8]) -> Result<()>;
+     fn mem_read(&mut self, address: u32, size: usize, result: &mut [u8]) -> Result<usize>;
+     fn is_mapped(&self, address: u32, size: usize) -> bool;
++    fn install_fast_hook(&mut self, _pc: u32, _hook: EngineFastHook) -> bool {
++        false
++    }
+ }
+ 
+ #[allow(clippy::enum_variant_names)]
+diff --git a/wie-core-arm/src/engine/arm32_cpu.rs b/wie-core-arm/src/engine/arm32_cpu.rs
+index 5dbad8ff..d310d31a 100644
+--- a/wie-core-arm/src/engine/arm32_cpu.rs
++++ b/wie-core-arm/src/engine/arm32_cpu.rs
+@@ -1,15 +1,14 @@
+-use alloc::{boxed::Box, format, vec};
+-use core::cell::RefCell;
+-
++use alloc::{boxed::Box, collections::BTreeMap, format, vec};
+ use arm32_cpu::{Cpu, Memory, Mode, reg};
+ 
+ use wie_util::{Result, WieError};
+ 
+-use crate::engine::{ArmEngine, ArmRegister, EngineRunResult, EngineStopReason, MemoryPermission};
++use crate::engine::{ArmEngine, ArmRegister, EngineFastHook, EngineRunResult, EngineStopReason, MemoryPermission};
+ 
+ pub struct Arm32CpuEngine {
+     cpu: Cpu,
+     mem: EmulatedMemory,
++    fast_hooks: BTreeMap<u32, EngineFastHook>,
+ }
+ 
+ impl Arm32CpuEngine {
+@@ -17,41 +16,46 @@ impl Arm32CpuEngine {
+         Self {
+             cpu: Cpu::new(),
+             mem: EmulatedMemory::new(),
++            fast_hooks: BTreeMap::new(),
+         }
+     }
+-
+-    fn is_svc_exception(&self) -> bool {
+-        self.cpu.reg_get(Mode::User, reg::PC) == 0x08 && (self.cpu.reg_get(Mode::User, reg::CPSR) & 0x1f) == 0x13
+-    }
+-
+-    fn read_svc_result(&mut self) -> Result<EngineStopReason> {
+-        let lr = self.cpu.reg_get(Mode::Supervisor, reg::LR);
+-        let spsr = self.cpu.reg_get(Mode::Supervisor, reg::SPSR);
+-
+-        let svc_address = lr.checked_sub(2).ok_or(WieError::InvalidMemoryAccess(lr))?;
+-        let mut svc_bytes = [0u8; 2];
+-        self.mem.read_range(svc_address, 2, &mut svc_bytes)?;
+-        let instruction = u16::from_le_bytes(svc_bytes);
+-        if instruction & 0xff00 != 0xdf00 {
+-            return Err(WieError::FatalError(format!(
+-                "Invalid Thumb SVC instruction {instruction:#06x} at {svc_address:#x}"
+-            )));
+-        }
+-
+-        let category = instruction as u32 & 0xff;
+-
+-        Ok(EngineStopReason::Svc { category, lr, spsr })
+-    }
+ }
+ 
+ impl ArmEngine for Arm32CpuEngine {
+     fn run(&mut self, end: u32, count: u32) -> Result<EngineRunResult> {
+         let mut instructions_executed = 0;
++        // Keep one memory adapter alive for the complete execution slice.
++        // Recreating it for every guest instruction is particularly expensive
++        // in WebAssembly, where this loop is the emulator's hottest path.
++        let cpu = &mut self.cpu;
++        let mut memory = self.mem.as_arm32cpu_memory();
++        let fast_hooks = &self.fast_hooks;
+         let stop_reason = loop {
+-            let pc = self.cpu.reg_get(Mode::User, reg::PC);
+-
+-            if self.is_svc_exception() {
+-                break self.read_svc_result()?;
++            let pc = cpu.reg_get(Mode::User, reg::PC);
++
++            if cpu.reg_get(Mode::User, reg::PC) == 0x08 && (cpu.reg_get(Mode::User, reg::CPSR) & 0x1f) == 0x13 {
++                let lr = cpu.reg_get(Mode::Supervisor, reg::LR);
++                let spsr = cpu.reg_get(Mode::Supervisor, reg::SPSR);
++                let svc_address = lr.checked_sub(2).ok_or(WieError::InvalidMemoryAccess(lr))?;
++                let instruction = memory.r16(svc_address);
++                if let Some(address) = memory.memory_error() {
++                    return Err(WieError::InvalidMemoryAccess(address));
++                }
++                if instruction & 0xff00 != 0xdf00 {
++                    return Err(WieError::FatalError(format!(
++                        "Invalid Thumb SVC instruction {instruction:#06x} at {svc_address:#x}"
++                    )));
++                }
++                if let Some(hook) = fast_hooks.get(&svc_address).copied() {
++                    run_fast_hook(cpu, &mut memory, hook)?;
++                    cpu.reg_set(Mode::User, reg::CPSR, spsr);
++                    continue;
++                }
++                break EngineStopReason::Svc {
++                    category: instruction as u32 & 0xff,
++                    lr,
++                    spsr,
++                };
+             }
+ 
+             if pc < 0x1000 {
+@@ -66,14 +70,12 @@ impl ArmEngine for Arm32CpuEngine {
+                 break EngineStopReason::Yield;
+             }
+ 
+-            let mut arm32cpu_memory = self.mem.as_arm32cpu_memory();
+-
+-            if !(self.cpu.step(&mut arm32cpu_memory)) {
++            if !(cpu.step(&mut memory)) {
+                 return Err(WieError::FatalError("Undefined instruction".into()));
+             }
+             instructions_executed += 1;
+ 
+-            if let Some(x) = arm32cpu_memory.memory_error() {
++            if let Some(x) = memory.memory_error() {
+                 return Err(WieError::InvalidMemoryAccess(x));
+             }
+         };
+@@ -115,6 +117,103 @@ impl ArmEngine for Arm32CpuEngine {
+     fn is_mapped(&self, address: u32, size: usize) -> bool {
+         self.mem.is_mapped(address, size)
+     }
++
++    fn install_fast_hook(&mut self, pc: u32, hook: EngineFastHook) -> bool {
++        self.fast_hooks.insert(pc, hook);
++        true
++    }
++}
++
++fn run_fast_hook(cpu: &mut Cpu, memory: &mut Arm32CpuMemory<'_>, hook: EngineFastHook) -> Result<()> {
++    let get = |cpu: &Cpu, register| cpu.reg_get(Mode::User, register);
++    match hook {
++        EngineFastHook::Rgb565FromRgbSvc => {
++            let r = get(cpu, 0) as u8;
++            let g = get(cpu, 1) as u8;
++            let b = get(cpu, 2) as u8;
++            let pixel = ((u32::from(r) >> 3) << 11) | ((u32::from(g) >> 2) << 5) | (u32::from(b) >> 3);
++            cpu.reg_set(Mode::User, 0, pixel);
++            cpu.reg_set(Mode::User, reg::PC, cpu.reg_get(Mode::Supervisor, reg::LR));
++        }
++        EngineFastHook::Memcpy => {
++            let dst = get(cpu, 0);
++            let src = get(cpu, 1);
++            let len = get(cpu, 2);
++            for i in 0..len {
++                let value = memory.r8(src.wrapping_add(i));
++                memory.w8(dst.wrapping_add(i), value);
++            }
++            let return_pc = get(cpu, reg::LR);
++            cpu.reg_set(Mode::User, reg::PC, return_pc & !1);
++        }
++        EngineFastHook::Memset => {
++            let dst = get(cpu, 0);
++            let value = get(cpu, 1) as u8;
++            let len = get(cpu, 2);
++            for i in 0..len {
++                memory.w8(dst.wrapping_add(i), value);
++            }
++            let return_pc = get(cpu, reg::LR);
++            cpu.reg_set(Mode::User, reg::PC, return_pc & !1);
++        }
++        EngineFastHook::Rgb565TransparentCopy { reverse, exit_pc } => {
++            let count = get(cpu, 4);
++            let dst = get(cpu, 1);
++            let src = get(cpu, 2);
++            let transparent = get(cpu, 3) as u16;
++            for i in 0..count {
++                let pixel = memory.r16(src.wrapping_add(i * 2));
++                if pixel != transparent {
++                    let address = if reverse { dst.wrapping_sub((i + 1) * 2) } else { dst.wrapping_add(i * 2) };
++                    memory.w16(address, pixel);
++                }
++            }
++            let bytes = count.wrapping_mul(2);
++            cpu.reg_set(Mode::User, 4, 0);
++            cpu.reg_set(Mode::User, 1, if reverse { dst.wrapping_sub(bytes) } else { dst.wrapping_add(bytes) });
++            cpu.reg_set(Mode::User, 2, src.wrapping_add(bytes));
++            cpu.reg_set(Mode::User, reg::PC, exit_pc & !1);
++        }
++        EngineFastHook::Rgb565PaletteCopy { reverse, transparent, exit_pc } => {
++            let palette = get(cpu, 0);
++            let count = get(cpu, 4);
++            let src = get(cpu, 1);
++            let dst = get(cpu, 2);
++            for i in 0..count {
++                let index = memory.r8(src.wrapping_add(i)) as u32;
++                if !transparent || index != 0 {
++                    let pixel = memory.r16(palette.wrapping_add(index * 2));
++                    let address = if reverse { dst.wrapping_sub((i + 1) * 2) } else { dst.wrapping_add(i * 2) };
++                    memory.w16(address, pixel);
++                }
++            }
++            let bytes = count.wrapping_mul(2);
++            cpu.reg_set(Mode::User, 4, 0);
++            cpu.reg_set(Mode::User, 1, src.wrapping_add(count));
++            cpu.reg_set(Mode::User, 2, if reverse { dst.wrapping_sub(bytes) } else { dst.wrapping_add(bytes) });
++            cpu.reg_set(Mode::User, reg::PC, exit_pc & !1);
++        }
++        EngineFastHook::Rgb565HalfBlendRow { exit_pc } => {
++            let dst = get(cpu, 4);
++            let count = get(cpu, 3);
++            let color_rb = get(cpu, 12);
++            let color_g = get(cpu, 7);
++            for i in 0..count {
++                let address = dst.wrapping_add(i * 2);
++                let old = memory.r16(address) as u32;
++                let blended = (((old & 0xf81f).wrapping_add(color_rb) >> 1) & 0xf81f)
++                    | (((old & 0x07e0).wrapping_add(color_g) >> 1) & 0x07e0);
++                memory.w16(address, blended as u16);
++            }
++            cpu.reg_set(Mode::User, 4, dst.wrapping_add(count.wrapping_mul(2)));
++            cpu.reg_set(Mode::User, 1, 0);
++            cpu.reg_set(Mode::User, reg::PC, exit_pc & !1);
++        }
++    }
++    if let Some(address) = memory.memory_error() {
++        return Err(WieError::InvalidMemoryAccess(address));
++    }
++    Ok(())
+ }
+ 
+ impl ArmRegister {
+@@ -232,19 +331,19 @@ impl EmulatedMemory {
+ 
+ struct Arm32CpuMemory<'a> {
+     emulated_memory: &'a mut EmulatedMemory,
+-    memory_error: RefCell<Option<u32>>,
++    memory_error: Option<u32>,
+ }
+ 
+ impl<'a> Arm32CpuMemory<'a> {
+     fn new(emulated_memory: &'a mut EmulatedMemory) -> Self {
+         Self {
+             emulated_memory,
+-            memory_error: RefCell::new(None),
++            memory_error: None,
+         }
+     }
+ 
+     fn memory_error(&self) -> Option<u32> {
+-        *self.memory_error.borrow()
++        self.memory_error
+     }
+ 
+     fn get_page(&mut self, addr: u32) -> Option<&mut [u8; PAGE_SIZE]> {
+@@ -254,7 +353,7 @@ impl<'a> Arm32CpuMemory<'a> {
+         if let Some(x) = page_data {
+             Some(x)
+         } else {
+-            *self.memory_error.borrow_mut() = Some(addr);
++            self.memory_error = Some(addr);
+             None
+         }
+     }
+diff --git a/wie-core-arm/src/lib.rs b/wie-core-arm/src/lib.rs
+index 3e96d4b6..749de8db 100644
+--- a/wie-core-arm/src/lib.rs
++++ b/wie-core-arm/src/lib.rs
+@@ -19,5 +19,6 @@ pub use self::{
+     binary_patches::install_binary_patches,
+     context::ArmCoreContext,
+     core::{ArmCore, RUN_FUNCTION_LR, RunFunctionResult},
++    engine::EngineFastHook,
+     function::{EmulatedFunction, EmulatedFunctionParam, JumpTo, RegisteredFunction, RegisteredFunctionHolder, ResultWriter, SvcId},
+ };
+diff --git a/wie-ktf/src/runtime/wipi_c/context.rs b/wie-ktf/src/runtime/wipi_c/context.rs
+index e5e02902..9abe9668 100644
+--- a/wie-ktf/src/runtime/wipi_c/context.rs
++++ b/wie-ktf/src/runtime/wipi_c/context.rs
+@@ -118,7 +118,11 @@ impl WIPICContext for KtfWIPICContext {
+             Err(err) => return Err(JvmSupport::to_wie_err(&self.jvm, err).await),
+         }
+ 
+-        Ok(result)
++        if result.is_some() {
++            return Ok(result);
++        }
++
++        Ok(self.system.filesystem().size(name).await)
+     }
+ 
+     async fn read_resource(&self, name: &str) -> Result<Vec<u8>> {
+@@ -127,7 +131,17 @@ impl WIPICContext for KtfWIPICContext {
+             .map_err(|err| WieError::FatalError(alloc::format!("Failed to get class loader for resource {name:?}: {err:?}")))?;
+         let stream = match JavaLangClassLoader::get_resource_as_stream(&self.jvm, &class_loader, name).await {
+             Ok(Some(stream)) => stream,
+-            Ok(None) => return Err(WieError::FatalError(alloc::format!("Resource disappeared before read: {name:?}"))),
++            Ok(None) => {
++                let Some(size) = self.system.filesystem().size(name).await else {
++                    return Err(WieError::FatalError(alloc::format!("Resource disappeared before read: {name:?}")));
++                };
++                let mut data = alloc::vec![0; size];
++                let Some(read) = self.system.filesystem().read(name, 0, size, &mut data).await else {
++                    return Err(WieError::FatalError(alloc::format!("Failed to read filesystem resource: {name:?}")));
++                };
++                data.truncate(read);
++                return Ok(data);
++            }
+             Err(err) => {
+                 tracing::error!("Java exception while opening resource for read: name={name:?}, error={err:?}");
+                 return Err(JvmSupport::to_wie_err(&self.jvm, err).await);
+diff --git a/wie-ktf/src/runtime/wipi_c/method_table.rs b/wie-ktf/src/runtime/wipi_c/method_table.rs
+index 8ee5d7df..8792eeed 100644
+--- a/wie-ktf/src/runtime/wipi_c/method_table.rs
++++ b/wie-ktf/src/runtime/wipi_c/method_table.rs
+@@ -5,11 +5,11 @@ use wipi_types::{
+     wipic::WIPICWord,
+ };
+ 
+-use wie_core_arm::ArmCore;
++use wie_core_arm::{ArmCore, EngineFastHook};
+ use wie_util::{Result, WieError};
+ use wie_wipi_c::{
+     MethodImpl, WIPICContext, WIPICMethodBody,
+-    api::{database, graphics, kernel, media, misc, net, uic, util},
++    api::{database, graphics, kernel, media, misc, net, qtc_database, uic, util},
+ };
+ 
+ use crate::runtime::{
+@@ -127,7 +127,11 @@ pub fn get_graphics_interface(core: &mut ArmCore) -> Result<WIPICGraphicsInterfa
+         get_rgb_pixels: core.make_svc_stub(SVC_CATEGORY_WIPIC, table_id.function_id(WIPICGraphicsMethodId::GetRgbPixels))?,
+         set_rgb_pixels: core.make_svc_stub(SVC_CATEGORY_WIPIC, table_id.function_id(WIPICGraphicsMethodId::SetRgbPixels))?,
+         flush_lcd: core.make_svc_stub(SVC_CATEGORY_WIPIC, table_id.function_id(WIPICGraphicsMethodId::FlushLcd))?,
+-        get_pixel_from_rgb: core.make_svc_stub(SVC_CATEGORY_WIPIC, table_id.function_id(WIPICGraphicsMethodId::GetPixelFromRgb))?,
++        get_pixel_from_rgb: core.make_fast_svc_stub(
++            SVC_CATEGORY_WIPIC,
++            table_id.function_id(WIPICGraphicsMethodId::GetPixelFromRgb),
++            EngineFastHook::Rgb565FromRgbSvc,
++        )?,
+         get_rgb_from_pixel: core.make_svc_stub(SVC_CATEGORY_WIPIC, table_id.function_id(WIPICGraphicsMethodId::GetRgbFromPixel))?,
+         get_display_info: core.make_svc_stub(SVC_CATEGORY_WIPIC, table_id.function_id(WIPICGraphicsMethodId::GetDisplayInfo))?,
+         repaint: core.make_svc_stub(SVC_CATEGORY_WIPIC, table_id.function_id(WIPICGraphicsMethodId::Repaint))?,
+@@ -493,13 +497,15 @@ pub fn get_method_body(table_id: WIPICTableId, function_id: u16) -> Option<WIPIC
+             WIPICGraphicsMethodId::GetImageInfo => Some(gen_stub(59, "OEMC_grpGetImageInfo")),
+         },
+         WIPICTableId::Interface3 => get_unk3_method_table().into_iter().nth(function_id as usize),
+-        WIPICTableId::Interface4 => {
+-            if function_id < 64 {
+-                Some(gen_stub(4, "stub"))
+-            } else {
+-                None
+-            }
+-        }
++        WIPICTableId::Interface4 => match function_id {
++            0 => Some(qtc_database::open.into_body()),
++            1 => Some(qtc_database::close.into_body()),
++            3 => Some(qtc_database::add.into_body()),
++            4 => Some(qtc_database::find.into_body()),
++            5 => Some(qtc_database::get.into_body()),
++            2 | 6..64 => Some(gen_stub(4, "stub")),
++            _ => None,
++        },
+         WIPICTableId::Interface5 => {
+             if function_id < 64 {
+                 Some(gen_stub(5, "stub"))
+diff --git a/wie-web/src/css/style.css b/wie-web/src/css/style.css
+index fee78978..65b568bc 100644
+--- a/wie-web/src/css/style.css
++++ b/wie-web/src/css/style.css
+@@ -446,7 +446,6 @@ svg {
+ .canvas-wrapper {
+   position: relative;
+   width: min(100vw, 480px);
+-  aspect-ratio: 3 / 4;
+   background: var(--card-bg);
+ }
+ 
+@@ -455,6 +454,8 @@ svg {
+   width: 100%;
+   height: 100%;
+   background: var(--card-bg);
++  image-rendering: crisp-edges;
++  image-rendering: pixelated;
+ }
+ 
+ .button-container {
+diff --git a/wie-web/src/rust/lib.rs b/wie-web/src/rust/lib.rs
+index 97db875f..02447a9f 100644
+--- a/wie-web/src/rust/lib.rs
++++ b/wie-web/src/rust/lib.rs
+@@ -79,20 +79,32 @@ struct WieWebPlatform {
+     database_repository: DatabaseRepository,
+     filesystem: WebFilesystem,
+     font: Font,
++    clock_origin_real: f64,
++    clock_origin_emulated: f64,
+     window: WindowImpl,
+ }
+ 
++// Dragonlord was authored for a much faster native ARM feature-phone runtime.
++// In the WebView build, its frame loop waits on the emulated platform clock in
++// addition to paying the ARM-interpreter cost, so animations and battles run at
++// roughly half pace even while the interpreter is fully busy.  Advance the
++// guest clock faster than wall time to compensate for that WebView overhead.
++const WEBVIEW_GUEST_CLOCK_SCALE: f64 = 6.0;
++
+ // XXX we're on single thread
+ unsafe impl Sync for WieWebPlatform {}
+ unsafe impl Send for WieWebPlatform {}
+ 
+ impl WieWebPlatform {
+     fn new(window: WindowImpl, font: Font, audio_player: AudioPlayer) -> Self {
++        let now = js_sys::Date::now();
+         Self {
+             audio_player,
+             database_repository: DatabaseRepository::new(),
+             filesystem: WebFilesystem::new(),
+             font,
++            clock_origin_real: now,
++            clock_origin_emulated: now,
+             window,
+         }
+     }
+@@ -108,8 +120,8 @@ impl Platform for WieWebPlatform {
+     }
+ 
+     fn now(&self) -> Instant {
+-        let date = js_sys::Date::new_0();
+-        let millis = date.value_of();
++        let elapsed = (js_sys::Date::now() - self.clock_origin_real).max(0.0);
++        let millis = self.clock_origin_emulated + elapsed * WEBVIEW_GUEST_CLOCK_SCALE;
+ 
+         Instant::from_epoch_millis(millis as _)
+     }
+@@ -296,11 +308,6 @@ impl WieWeb {
+     }
+ 
+     pub fn update(&mut self) -> Result<(), JsError> {
+-        if self.should_redraw.load(Ordering::SeqCst) {
+-            self.emulator.handle_event(Event::Redraw);
+-            self.should_redraw.store(false, Ordering::SeqCst)
+-        }
+-
+         let date = js_sys::Date::new_0();
+         let millis = date.value_of();
+ 
+@@ -314,6 +321,12 @@ impl WieWeb {
+         self.emulator.tick().map_err(|e| JsError::new(&e.to_string()))
+     }
+ 
++    pub fn redraw(&mut self) {
++        if self.should_redraw.swap(false, Ordering::SeqCst) {
++            self.emulator.handle_event(Event::Redraw);
++        }
++    }
++
+     pub fn key_down(&mut self, key: String) -> Result<(), JsError> {
+         let date = js_sys::Date::new_0();
+         let millis = date.value_of();
+diff --git a/wie-web/src/ts/app.ts b/wie-web/src/ts/app.ts
+index e8cf0abb..d785e0c9 100644
+--- a/wie-web/src/ts/app.ts
++++ b/wie-web/src/ts/app.ts
+@@ -36,6 +36,7 @@ export const runApp = (app: AppMetadata, archive: Uint8Array, fontData: Uint8Arr
+   const playerView = document.getElementById("player-view") as HTMLElement;
+   const playerTitle = document.getElementById("player-title") as HTMLElement;
+   const canvas = document.getElementById("canvas") as HTMLCanvasElement;
++  const canvasWrapper = canvas.closest(".canvas-wrapper") as HTMLElement;
+   const backToLibrary = document.getElementById("back-to-library") as HTMLButtonElement;
+   const appSettings = document.getElementById("app-settings") as HTMLButtonElement;
+ 
+@@ -46,6 +47,19 @@ export const runApp = (app: AppMetadata, archive: Uint8Array, fontData: Uint8Arr
+   const unsubscribePcmVolume = settings.onPcmVolumeChange((volume) => wieWeb.set_pcm_volume(volume));
+   let running = true;
+ 
++  // The KTF title resizes the backing canvas to 176x220. Stretching that
++  // surface into the old fixed 3:4 player box both changes its aspect ratio
++  // and produces uneven fractional source pixels on Android. Fit the largest
++  // whole-number scale instead, preserving every handset pixel exactly.
++  const fitCanvasToHandsetPixels = () => {
++    const availableWidth = Math.min(window.innerWidth, 480);
++    const scale = Math.max(1, Math.floor(availableWidth / canvas.width));
++    canvasWrapper.style.width = `${canvas.width * scale}px`;
++    canvasWrapper.style.height = `${canvas.height * scale}px`;
++  };
++  fitCanvasToHandsetPixels();
++  window.addEventListener("resize", fitCanvasToHandsetPixels, { signal: abortController.signal });
++
+   wieWeb.set_pcm_volume(settings.pcmVolume);
+   playerTitle.textContent = app.title;
+   createIcons({ icons, root: playerView });
+@@ -105,22 +119,45 @@ export const runApp = (app: AppMetadata, archive: Uint8Array, fontData: Uint8Arr
+     { signal: abortController.signal },
+   );
+ 
+-  const update = () => {
++  // Keep emulation independent from the display refresh rate. Running one
++  // executor slice per animation frame leaves the guest idle between frames
++  // and becomes especially slow when a mobile WebView drops to 30 Hz.
++  const updateChannel = new MessageChannel();
++  let redrawRequest = 0;
++  updateChannel.port1.onmessage = () => {
+     if (!running) {
+       return;
+     }
+ 
+     try {
+       wieWeb.update();
+-      requestAnimationFrame(update);
++      updateChannel.port2.postMessage(undefined);
+     } catch (error) {
+       exit(error);
+     }
+   };
+-  requestAnimationFrame(update);
++  updateChannel.port2.postMessage(undefined);
++
++  // Canvas uploads are much more expensive than guest execution on Android.
++  // Keep the emulator running continuously, but coalesce repeated repaint
++  // requests into one upload per display frame. This avoids flooding the
++  // WebView compositor and removes the periodic hitching that causes uneven
++  // animation even when the guest clock is fast enough.
++  const redraw = () => {
++    if (!running) {
++      return;
++    }
++
++    wieWeb.redraw();
++    redrawRequest = requestAnimationFrame(redraw);
++  };
++  redrawRequest = requestAnimationFrame(redraw);
+ 
+   return () => {
+     running = false;
++    cancelAnimationFrame(redrawRequest);
++    updateChannel.port1.close();
++    updateChannel.port2.close();
+     abortController.abort();
+     unsubscribePcmVolume();
+     wieWeb.free();
+diff --git a/wie-web/src/ts/midi.ts b/wie-web/src/ts/midi.ts
+index 89569665..99a4b987 100644
+--- a/wie-web/src/ts/midi.ts
++++ b/wie-web/src/ts/midi.ts
+@@ -23,13 +23,25 @@ let pcmVolume = 0.5;
+ let audioReady: Promise<AudioState | null> | undefined;
+ 
+ async function initAudio(ctx: AudioContext): Promise<AudioState> {
++  // MIDI and SMAF wave tracks can play at the same time. Connecting both
++  // gains straight to the destination lets their summed peaks clip, which is
++  // heard as crackle on phone speakers. Keep the individual volume controls,
++  // but mix them through one fast limiter before the hardware output.
++  const limiter = ctx.createDynamicsCompressor();
++  limiter.threshold.value = -3;
++  limiter.knee.value = 0;
++  limiter.ratio.value = 20;
++  limiter.attack.value = 0.003;
++  limiter.release.value = 0.1;
++  limiter.connect(ctx.destination);
++
+   const midiGain = ctx.createGain();
+   midiGain.gain.value = midiVolume;
+-  midiGain.connect(ctx.destination);
++  midiGain.connect(limiter);
+ 
+   const pcmGain = ctx.createGain();
+   pcmGain.gain.value = pcmVolume;
+-  pcmGain.connect(ctx.destination);
++  pcmGain.connect(limiter);
+ 
+   let synth: WorkletSynthesizer | null = null;
+   try {
+diff --git a/wie-wipi-c/src/api.rs b/wie-wipi-c/src/api.rs
+index 3898c17f..e22bfe39 100644
+--- a/wie-wipi-c/src/api.rs
++++ b/wie-wipi-c/src/api.rs
+@@ -4,5 +4,6 @@ pub mod kernel;
+ pub mod media;
+ pub mod misc;
+ pub mod net;
++pub mod qtc_database;
+ pub mod uic;
+ pub mod util;
+diff --git a/wie-wipi-c/src/api/database.rs b/wie-wipi-c/src/api/database.rs
+index 96633803..d67bce31 100644
+--- a/wie-wipi-c/src/api/database.rs
++++ b/wie-wipi-c/src/api/database.rs
+@@ -568,13 +568,13 @@ pub async fn exists_database_ktf(context: &mut dyn WIPICContext, name_ptr: WIPIC
+         Ok(bytes) => match String::from_utf8(bytes) {
+             Ok(s) => s,
+             Err(_) => {
+-                tracing::warn!("MC_dbExists invalid utf8 name @ {name_ptr:#x}, defaulting to 0");
+-                return Ok(0);
++                tracing::warn!("MC_dbExists invalid utf8 name @ {name_ptr:#x}, defaulting to not found");
++                return Ok(-12);
+             }
+         },
+         Err(_) => {
+-            tracing::warn!("MC_dbExists unreadable name @ {name_ptr:#x}, defaulting to 0");
+-            return Ok(0);
++            tracing::warn!("MC_dbExists unreadable name @ {name_ptr:#x}, defaulting to not found");
++            return Ok(-12);
+         }
+     };
+ 
+@@ -582,7 +582,10 @@ pub async fn exists_database_ktf(context: &mut dyn WIPICContext, name_ptr: WIPIC
+     let pid = system.pid().to_owned();
+     let exists = system.platform().database_repository().exists(&name, &pid).await;
+ 
+-    let result = if exists { 1 } else { 0 };
++    // KTF's custom MC_dbExists follows WIPI status conventions: success is
++    // zero and a missing database is M_E_NOENT (-12). Several native titles
++    // branch directly on zero before calling MC_dbOpenDataBase.
++    let result = if exists { 0 } else { -12 };
+     tracing::debug!("MC_dbExists({name:?}) -> {result}");
+     Ok(result)
+ }
+diff --git a/wie-wipi-c/src/api/kernel.rs b/wie-wipi-c/src/api/kernel.rs
+index b5fde9c5..667c0f30 100644
+--- a/wie-wipi-c/src/api/kernel.rs
++++ b/wie-wipi-c/src/api/kernel.rs
+@@ -255,13 +255,13 @@ pub async fn sprintk(
+ pub async fn get_total_memory(_context: &mut dyn WIPICContext) -> Result<i32> {
+     tracing::warn!("stub MC_knlGetTotalMemory()");
+ 
+-    Ok(0x100000) // TODO hardcoded
++    Ok(0x1000000) // TODO hardcoded
+ }
+ 
+ pub async fn get_free_memory(_context: &mut dyn WIPICContext) -> Result<i32> {
+     tracing::warn!("stub MC_knlGetFreeMemory()");
+ 
+-    Ok(0x100000) // TODO hardcoded
++    Ok(0x1000000) // TODO hardcoded
+ }
+ 
+ pub async fn exit(context: &mut dyn WIPICContext, code: i32) -> Result<()> {
+diff --git a/wie-wipi-c/src/api/qtc_database.rs b/wie-wipi-c/src/api/qtc_database.rs
+new file mode 100644
+index 00000000..bc252425
+--- /dev/null
++++ b/wie-wipi-c/src/api/qtc_database.rs
+@@ -0,0 +1,209 @@
++use alloc::{format, string::String, vec, vec::Vec};
++use core::mem::size_of;
++
++use bytemuck::{Pod, Zeroable};
++use wie_util::{Result, read_generic, read_null_terminated_string_bytes, write_generic};
++use wipi_types::wipic::WIPICWord;
++
++use crate::WIPICContext;
++
++const HANDLE_MAGIC: u32 = 0x5154_4344; // "QTCD"
++const HEADER_SIZE: usize = 45;
++
++#[derive(Clone, Copy, Pod, Zeroable)]
++#[repr(C)]
++struct Handle {
++    magic: u32,
++    record_size: u32,
++    record_count: u32,
++    records_ptr: u32,
++    records_capacity: u32,
++    cursor: u32,
++}
++
++/// KTF's fixed-record database used by older native titles. Packaged files
++/// carry the `qtcdb` header and are addressed without the `.db` suffix.
++pub async fn open(context: &mut dyn WIPICContext, name_ptr: WIPICWord, record_size: u32, create: u32, _kind: u32) -> Result<i32> {
++    let Ok(name) = String::from_utf8(read_null_terminated_string_bytes(context, name_ptr)?) else {
++        return Ok(-22);
++    };
++    if record_size == 0 {
++        return Ok(-22);
++    }
++
++    let path = format!("{name}.db");
++    let bytes = read_file(context, &path).await;
++    if bytes.is_none() && create == 0 {
++        return Ok(-12);
++    }
++
++    let mut records = Vec::new();
++    if let Some(bytes) = bytes
++        && bytes.len() >= HEADER_SIZE
++        && &bytes[..5] == b"qtcdb"
++    {
++        let stored_size = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
++        if stored_size == record_size as usize {
++            let mut cursor = HEADER_SIZE;
++            while cursor + 1 + stored_size <= bytes.len() {
++                if bytes[cursor] != 0 {
++                    records.extend_from_slice(&bytes[cursor + 1..cursor + 1 + stored_size]);
++                }
++                cursor += 1 + stored_size;
++            }
++        }
++    }
++
++    let capacity = records.len().max(record_size as usize * 4) as u32;
++    let records_ptr = context.alloc_raw(capacity)?;
++    if !records.is_empty() {
++        context.write_bytes(records_ptr, &records)?;
++    }
++    let handle = Handle {
++        magic: HANDLE_MAGIC,
++        record_size,
++        record_count: records.len() as u32 / record_size,
++        records_ptr,
++        records_capacity: capacity,
++        cursor: 0,
++    };
++    let handle_ptr = context.alloc_raw(size_of::<Handle>() as u32)?;
++    write_generic(context, handle_ptr, handle)?;
++    tracing::debug!(
++        "qtcdb.open({name:?}, record_size={record_size}, create={create}) -> {handle_ptr:#x}, records={}",
++        handle.record_count
++    );
++    Ok(handle_ptr as i32)
++}
++
++pub async fn close(context: &mut dyn WIPICContext, handle_ptr: i32) -> Result<i32> {
++    let Some(handle) = load_handle(context, handle_ptr)? else {
++        return Ok(-25);
++    };
++    context.free_raw(handle.records_ptr, handle.records_capacity)?;
++    context.free_raw(handle_ptr as u32, size_of::<Handle>() as u32)?;
++    tracing::debug!("qtcdb.close({handle_ptr:#x})");
++    Ok(0)
++}
++
++pub async fn add(context: &mut dyn WIPICContext, handle_ptr: i32, data_ptr: WIPICWord, length: u32) -> Result<i32> {
++    let Some(mut handle) = load_handle(context, handle_ptr)? else {
++        return Ok(-25);
++    };
++    if length != handle.record_size {
++        return Ok(-22);
++    }
++    let end = (handle.record_count + 1)
++        .checked_mul(handle.record_size)
++        .ok_or(wie_util::WieError::InvalidMemoryAccess(0))?;
++    if end > handle.records_capacity {
++        let new_capacity = end.max(handle.records_capacity.saturating_mul(2));
++        let new_ptr = context.alloc_raw(new_capacity)?;
++        let mut old = vec![0; (handle.record_count * handle.record_size) as usize];
++        context.read_bytes(handle.records_ptr, &mut old)?;
++        context.write_bytes(new_ptr, &old)?;
++        context.free_raw(handle.records_ptr, handle.records_capacity)?;
++        handle.records_ptr = new_ptr;
++        handle.records_capacity = new_capacity;
++    }
++    let mut data = vec![0; length as usize];
++    context.read_bytes(data_ptr, &mut data)?;
++    context.write_bytes(handle.records_ptr + handle.record_count * handle.record_size, &data)?;
++    handle.record_count += 1;
++    write_generic(context, handle_ptr as u32, handle)?;
++    tracing::debug!("qtcdb.add({handle_ptr:#x}, {data_ptr:#x}, {length}) -> {}", handle.record_count - 1);
++    Ok((handle.record_count - 1) as i32)
++}
++
++pub async fn find(context: &mut dyn WIPICContext, handle_ptr: i32, index: i32, out_ptr: WIPICWord, length: u32) -> Result<i32> {
++    let Some(mut handle) = load_handle(context, handle_ptr)? else {
++        return Ok(-25);
++    };
++    if length != handle.record_size {
++        return Ok(-22);
++    }
++    if handle.record_count == 0 {
++        return Ok(-22);
++    }
++    let index = if index < 0 { 0 } else { index as u32 };
++    if index >= handle.record_count {
++        return Ok(-22);
++    }
++    let mut data = vec![0; handle.record_size as usize];
++    context.read_bytes(handle.records_ptr + index * handle.record_size, &mut data)?;
++    context.write_bytes(out_ptr, &data)?;
++    handle.cursor = index + 1;
++    write_generic(context, handle_ptr as u32, handle)?;
++    tracing::debug!("qtcdb.find({handle_ptr:#x}, index={index}, out={out_ptr:#x}, {length}) -> 0");
++    Ok(0)
++}
++
++pub async fn get(context: &mut dyn WIPICContext, handle_ptr: i32, index: i32, out_ptr: WIPICWord, length: u32) -> Result<i32> {
++    let Some(mut handle) = load_handle(context, handle_ptr)? else {
++        return Ok(-25);
++    };
++    let index = if index < 0 { handle.cursor } else { index as u32 };
++    tracing::debug!("qtcdb.get({handle_ptr:#x}, index={index}, out={out_ptr:#x}, {length})");
++    if index >= handle.record_count || length < handle.record_size {
++        return Ok(-22);
++    }
++    let mut data = vec![0; handle.record_size as usize];
++    context.read_bytes(handle.records_ptr + index * handle.record_size, &mut data)?;
++    context.write_bytes(out_ptr, &data)?;
++    handle.cursor = index + 1;
++    write_generic(context, handle_ptr as u32, handle)?;
++    Ok(0)
++}
++
++fn load_handle(context: &mut dyn WIPICContext, ptr: i32) -> Result<Option<Handle>> {
++    if ptr < 0x10000 {
++        return Ok(None);
++    }
++    let handle: Handle = read_generic(context, ptr as u32)?;
++    Ok((handle.magic == HANDLE_MAGIC).then_some(handle))
++}
++
++async fn read_file(context: &mut dyn WIPICContext, path: &str) -> Option<Vec<u8>> {
++    let size = context.system().filesystem().size(path).await?;
++    let mut bytes = vec![0; size];
++    let read = context.system().filesystem().read(path, 0, size, &mut bytes).await?;
++    bytes.truncate(read);
++    Some(bytes)
++}
++
++#[cfg(test)]
++mod tests {
++    use alloc::{boxed::Box, vec};
++
++    use test_utils::TestPlatform;
++    use wie_backend::{DefaultTaskRunner, System};
++    use wie_util::{ByteRead, ByteWrite};
++
++    use crate::context::test::TestContext;
++
++    use super::{close, find, get, open};
++
++    #[futures_test::test]
++    async fn reads_packaged_fixed_records_in_order() {
++        let system = System::new(Box::new(TestPlatform::new()), "test-pid", "test-aid", DefaultTaskRunner);
++        let mut file = vec![0; 45];
++        file[..5].copy_from_slice(b"qtcdb");
++        file[8..12].copy_from_slice(&4u32.to_le_bytes());
++        file.extend_from_slice(&[1, 1, 2, 3, 4, 1, 5, 6, 7, 8]);
++        system.filesystem().add_virtual("records.db", file);
++
++        let mut context = TestContext::with_system(system);
++        context.write_bytes(0x1000, b"records\0").unwrap();
++        let handle = open(&mut context, 0x1000, 4, 0, 1).await.unwrap();
++
++        assert_eq!(find(&mut context, handle, -1, 0x2000, 4).await.unwrap(), 0);
++        assert_eq!(get(&mut context, handle, -1, 0x2010, 4).await.unwrap(), 0);
++        let mut first = [0; 4];
++        let mut second = [0; 4];
++        context.read_bytes(0x2000, &mut first).unwrap();
++        context.read_bytes(0x2010, &mut second).unwrap();
++        assert_eq!(first, [1, 2, 3, 4]);
++        assert_eq!(second, [5, 6, 7, 8]);
++        assert_eq!(close(&mut context, handle).await.unwrap(), 0);
++    }
++}
