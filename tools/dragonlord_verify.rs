@@ -103,12 +103,40 @@ fn main() -> Result<()> {
     for command in commands.iter() {
         if let AudioCommand::Play { handle, sequence, repeat } = command {
             let mut midi_events = 0usize;
+            let mut note_on = 0usize;
+            let mut note_off = 0usize;
+            let mut program_change = 0usize;
+            let mut control_change = 0usize;
+            let mut pitch_bend = 0usize;
+            let mut sysex = 0usize;
+            let mut percussion = 0usize;
             let mut wave_events = 0usize;
             let mut wave_samples = 0usize;
             let mut peak = 0i16;
             for event in &sequence.events {
                 match &event.data {
-                    AudioEventData::Midi(_) => midi_events += 1,
+                    AudioEventData::Midi(data) => {
+                        midi_events += 1;
+                        let status = data.first().copied().unwrap_or(0);
+                        match status & 0xf0 {
+                            0x80 => note_off += 1,
+                            0x90 => {
+                                if data.get(2).copied().unwrap_or(0) == 0 {
+                                    note_off += 1;
+                                } else {
+                                    note_on += 1;
+                                    if status & 0x0f == 9 {
+                                        percussion += 1;
+                                    }
+                                }
+                            }
+                            0xb0 => control_change += 1,
+                            0xc0 => program_change += 1,
+                            0xe0 => pitch_bend += 1,
+                            0xf0 => sysex += 1,
+                            _ => {}
+                        }
+                    }
                     AudioEventData::Wave { samples, .. } => {
                         wave_events += 1;
                         wave_samples += samples.len();
@@ -117,9 +145,11 @@ fn main() -> Result<()> {
                 }
             }
             println!(
-                "audio handle={handle} repeat={repeat} duration={} midi_events={midi_events} wave_events={wave_events} wave_samples={wave_samples} peak={peak}",
+                "audio handle={handle} repeat={repeat} duration={} midi_events={midi_events} note_on={note_on} note_off={note_off} programs={program_change} controls={control_change} bends={pitch_bend} sysex={sysex} percussion={percussion} wave_events={wave_events} wave_samples={wave_samples} peak={peak}",
                 sequence.duration
             );
+        } else if let AudioCommand::Stop { handle } = command {
+            println!("audio stop handle={handle}");
         }
     }
     drop(commands);
