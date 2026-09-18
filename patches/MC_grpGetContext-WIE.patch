@@ -12,6 +12,71 @@ index 173f29c0..cc153b58 100644
  
  [workspace.package]
  version = "0.1.4"
+diff --git a/test-utils/src/platform.rs b/test-utils/src/platform.rs
+index 88ee9255..38bd87b1 100644
+--- a/test-utils/src/platform.rs
++++ b/test-utils/src/platform.rs
+@@ -90,6 +90,17 @@ impl TestPlatform {
+             clock: Some(clock),
+         }
+     }
++
++    pub fn with_screen_capture(capture: Arc<Mutex<Vec<u32>>>, event_handler: impl Fn(TestPlatformEvent) + Sync + Send + 'static) -> Self {
++        Self {
++            screen: TestScreen::with_capture(capture),
++            event_handler: Some(Box::new(event_handler)),
++            fs: Arc::new(MemoryFilesystem::default()),
++            db: Arc::new(MemoryDatabaseRepository::default()),
++            font: Font::try_from_static(include_bytes!("../../assets/neodgm.ttf")).unwrap(),
++            clock: None,
++        }
++    }
+ }
+ 
+ impl Platform for TestPlatform {
+@@ -232,6 +243,7 @@ impl AudioSink for TestAudioSink {
+ pub struct TestScreen {
+     width: AtomicU32,
+     height: AtomicU32,
++    capture: Option<Arc<Mutex<Vec<u32>>>>,
+ }
+ 
+ impl Default for TestScreen {
+@@ -239,6 +251,17 @@ impl Default for TestScreen {
+         Self {
+             width: AtomicU32::new(320),
+             height: AtomicU32::new(240),
++            capture: None,
++        }
++    }
++}
++
++impl TestScreen {
++    fn with_capture(capture: Arc<Mutex<Vec<u32>>>) -> Self {
++        Self {
++            width: AtomicU32::new(320),
++            height: AtomicU32::new(240),
++            capture: Some(capture),
+         }
+     }
+ }
+@@ -255,7 +278,15 @@ impl Screen for TestScreen {
+         Ok(())
+     }
+ 
+-    fn paint(&self, _image: &dyn Image) {}
++    fn paint(&self, image: &dyn Image) {
++        if let Some(capture) = &self.capture {
++            *capture.lock() = image
++                .colors()
++                .into_iter()
++                .map(|pixel| u32::from_be_bytes([pixel.a, pixel.r, pixel.g, pixel.b]))
++                .collect();
++        }
++    }
+ 
+     fn width(&self) -> u32 {
+         self.width.load(Ordering::SeqCst)
 diff --git a/wie-app/tauri.conf.json b/wie-app/tauri.conf.json
 index 591e936a..889bd284 100644
 --- a/wie-app/tauri.conf.json
