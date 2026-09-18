@@ -580,10 +580,10 @@ index db698839..e84e6c24 100644
  
      #[test]
 diff --git a/wie-core-arm/src/engine.rs b/wie-core-arm/src/engine.rs
-index a756777e..d361bf51 100644
+index a756777e..442f5664 100644
 --- a/wie-core-arm/src/engine.rs
 +++ b/wie-core-arm/src/engine.rs
-@@ -18,6 +18,17 @@ pub struct EngineRunResult {
+@@ -18,6 +18,16 @@ pub struct EngineRunResult {
      pub instructions_executed: u32,
  }
  
@@ -591,7 +591,6 @@ index a756777e..d361bf51 100644
 +pub enum EngineFastHook {
 +    Memcpy,
 +    Memset,
-+    FixedEucKrStringWidthSvc { ascii_width: u32, multibyte_width: u32 },
 +    Rgb565FromRgbSvc,
 +    Rgb565TransparentCopy { reverse: bool, exit_pc: u32 },
 +    Rgb565PaletteCopy { reverse: bool, transparent: bool, exit_pc: u32 },
@@ -601,7 +600,7 @@ index a756777e..d361bf51 100644
  pub trait ArmEngine: Send + AsAny {
      fn run(&mut self, end: u32, count: u32) -> Result<EngineRunResult>;
      fn reg_write(&mut self, reg: ArmRegister, value: u32);
-@@ -26,6 +37,9 @@ pub trait ArmEngine: Send + AsAny {
+@@ -26,6 +36,9 @@ pub trait ArmEngine: Send + AsAny {
      fn mem_write(&mut self, address: u32, data: &[u8]) -> Result<()>;
      fn mem_read(&mut self, address: u32, size: usize, result: &mut [u8]) -> Result<usize>;
      fn is_mapped(&self, address: u32, size: usize) -> bool;
@@ -612,7 +611,7 @@ index a756777e..d361bf51 100644
  
  #[allow(clippy::enum_variant_names)]
 diff --git a/wie-core-arm/src/engine/arm32_cpu.rs b/wie-core-arm/src/engine/arm32_cpu.rs
-index 5dbad8ff..851cf4b6 100644
+index 5dbad8ff..d310d31a 100644
 --- a/wie-core-arm/src/engine/arm32_cpu.rs
 +++ b/wie-core-arm/src/engine/arm32_cpu.rs
 @@ -1,15 +1,14 @@
@@ -725,7 +724,7 @@ index 5dbad8ff..851cf4b6 100644
                  return Err(WieError::InvalidMemoryAccess(x));
              }
          };
-@@ -115,6 +117,134 @@ impl ArmEngine for Arm32CpuEngine {
+@@ -115,6 +117,103 @@ impl ArmEngine for Arm32CpuEngine {
      fn is_mapped(&self, address: u32, size: usize) -> bool {
          self.mem.is_mapped(address, size)
      }
@@ -739,37 +738,6 @@ index 5dbad8ff..851cf4b6 100644
 +fn run_fast_hook(cpu: &mut Cpu, memory: &mut Arm32CpuMemory<'_>, hook: EngineFastHook) -> Result<()> {
 +    let get = |cpu: &Cpu, register| cpu.reg_get(Mode::User, register);
 +    match hook {
-+        EngineFastHook::FixedEucKrStringWidthSvc {
-+            ascii_width,
-+            multibyte_width,
-+        } => {
-+            let mut address = get(cpu, 1);
-+            let length = get(cpu, 2);
-+            let mut consumed = 0u32;
-+            let mut width = 0u32;
-+            while length as i32 >= -1 && consumed != length {
-+                let byte = memory.r8(address);
-+                if memory.memory_error().is_some() {
-+                    break;
-+                }
-+                if length == u32::MAX && byte == 0 {
-+                    break;
-+                }
-+                if byte < 0x80 {
-+                    address = address.wrapping_add(1);
-+                    consumed = consumed.wrapping_add(1);
-+                    width = width.wrapping_add(ascii_width);
-+                } else {
-+                    let remaining = length.wrapping_sub(consumed);
-+                    let byte_count = if length == u32::MAX || remaining >= 2 { 2 } else { 1 };
-+                    address = address.wrapping_add(byte_count);
-+                    consumed = consumed.wrapping_add(byte_count);
-+                    width = width.wrapping_add(multibyte_width);
-+                }
-+            }
-+            cpu.reg_set(Mode::User, 0, width);
-+            cpu.reg_set(Mode::User, reg::PC, cpu.reg_get(Mode::Supervisor, reg::LR));
-+        }
 +        EngineFastHook::Rgb565FromRgbSvc => {
 +            let r = get(cpu, 0) as u8;
 +            let g = get(cpu, 1) as u8;
@@ -860,7 +828,7 @@ index 5dbad8ff..851cf4b6 100644
  }
  
  impl ArmRegister {
-@@ -232,19 +362,19 @@ impl EmulatedMemory {
+@@ -232,19 +331,19 @@ impl EmulatedMemory {
  
  struct Arm32CpuMemory<'a> {
      emulated_memory: &'a mut EmulatedMemory,
@@ -883,7 +851,7 @@ index 5dbad8ff..851cf4b6 100644
      }
  
      fn get_page(&mut self, addr: u32) -> Option<&mut [u8; PAGE_SIZE]> {
-@@ -254,7 +384,7 @@ impl<'a> Arm32CpuMemory<'a> {
+@@ -254,7 +353,7 @@ impl<'a> Arm32CpuMemory<'a> {
          if let Some(x) = page_data {
              Some(x)
          } else {
@@ -940,7 +908,7 @@ index e5e02902..9abe9668 100644
                  tracing::error!("Java exception while opening resource for read: name={name:?}, error={err:?}");
                  return Err(JvmSupport::to_wie_err(&self.jvm, err).await);
 diff --git a/wie-ktf/src/runtime/wipi_c/method_table.rs b/wie-ktf/src/runtime/wipi_c/method_table.rs
-index 8ee5d7df..d66fa280 100644
+index 8ee5d7df..8792eeed 100644
 --- a/wie-ktf/src/runtime/wipi_c/method_table.rs
 +++ b/wie-ktf/src/runtime/wipi_c/method_table.rs
 @@ -5,11 +5,11 @@ use wipi_types::{
@@ -970,23 +938,7 @@ index 8ee5d7df..d66fa280 100644
          get_rgb_from_pixel: core.make_svc_stub(SVC_CATEGORY_WIPIC, table_id.function_id(WIPICGraphicsMethodId::GetRgbFromPixel))?,
          get_display_info: core.make_svc_stub(SVC_CATEGORY_WIPIC, table_id.function_id(WIPICGraphicsMethodId::GetDisplayInfo))?,
          repaint: core.make_svc_stub(SVC_CATEGORY_WIPIC, table_id.function_id(WIPICGraphicsMethodId::Repaint))?,
-@@ -135,7 +139,14 @@ pub fn get_graphics_interface(core: &mut ArmCore) -> Result<WIPICGraphicsInterfa
-         get_font_height: core.make_svc_stub(SVC_CATEGORY_WIPIC, table_id.function_id(WIPICGraphicsMethodId::GetFontHeight))?,
-         get_font_ascent: core.make_svc_stub(SVC_CATEGORY_WIPIC, table_id.function_id(WIPICGraphicsMethodId::GetFontAscent))?,
-         get_font_descent: core.make_svc_stub(SVC_CATEGORY_WIPIC, table_id.function_id(WIPICGraphicsMethodId::GetFontDescent))?,
--        get_string_width: core.make_svc_stub(SVC_CATEGORY_WIPIC, table_id.function_id(WIPICGraphicsMethodId::GetStringWidth))?,
-+        get_string_width: core.make_fast_svc_stub(
-+            SVC_CATEGORY_WIPIC,
-+            table_id.function_id(WIPICGraphicsMethodId::GetStringWidth),
-+            EngineFastHook::FixedEucKrStringWidthSvc {
-+                ascii_width: 5,
-+                multibyte_width: 10,
-+            },
-+        )?,
-         get_unicode_string_width: core.make_svc_stub(SVC_CATEGORY_WIPIC, table_id.function_id(WIPICGraphicsMethodId::GetUnicodeStringWidth))?,
-         create_image: core.make_svc_stub(SVC_CATEGORY_WIPIC, table_id.function_id(WIPICGraphicsMethodId::CreateImage))?,
-         destroy_image: core.make_svc_stub(SVC_CATEGORY_WIPIC, table_id.function_id(WIPICGraphicsMethodId::DestroyImage))?,
-@@ -493,13 +504,15 @@ pub fn get_method_body(table_id: WIPICTableId, function_id: u16) -> Option<WIPIC
+@@ -493,13 +497,15 @@ pub fn get_method_body(table_id: WIPICTableId, function_id: u16) -> Option<WIPIC
              WIPICGraphicsMethodId::GetImageInfo => Some(gen_stub(59, "OEMC_grpGetImageInfo")),
          },
          WIPICTableId::Interface3 => get_unk3_method_table().into_iter().nth(function_id as usize),
