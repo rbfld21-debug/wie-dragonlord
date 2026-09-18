@@ -1103,7 +1103,7 @@ index fee78978..0aea22f9 100644
  
  .button-container {
 diff --git a/wie-web/src/rust/lib.rs b/wie-web/src/rust/lib.rs
-index 97db875f..d7684ea6 100644
+index 97db875f..02447a9f 100644
 --- a/wie-web/src/rust/lib.rs
 +++ b/wie-web/src/rust/lib.rs
 @@ -79,20 +79,32 @@ struct WieWebPlatform {
@@ -1120,7 +1120,7 @@ index 97db875f..d7684ea6 100644
 +// addition to paying the ARM-interpreter cost, so animations and battles run at
 +// roughly half pace even while the interpreter is fully busy.  Advance the
 +// guest clock faster than wall time to compensate for that WebView overhead.
-+const WEBVIEW_GUEST_CLOCK_SCALE: f64 = 2.0;
++const WEBVIEW_GUEST_CLOCK_SCALE: f64 = 6.0;
 +
  // XXX we're on single thread
  unsafe impl Sync for WieWebPlatform {}
@@ -1150,11 +1150,36 @@ index 97db875f..d7684ea6 100644
  
          Instant::from_epoch_millis(millis as _)
      }
+@@ -296,11 +308,6 @@ impl WieWeb {
+     }
+ 
+     pub fn update(&mut self) -> Result<(), JsError> {
+-        if self.should_redraw.load(Ordering::SeqCst) {
+-            self.emulator.handle_event(Event::Redraw);
+-            self.should_redraw.store(false, Ordering::SeqCst)
+-        }
+-
+         let date = js_sys::Date::new_0();
+         let millis = date.value_of();
+ 
+@@ -314,6 +321,12 @@ impl WieWeb {
+         self.emulator.tick().map_err(|e| JsError::new(&e.to_string()))
+     }
+ 
++    pub fn redraw(&mut self) {
++        if self.should_redraw.swap(false, Ordering::SeqCst) {
++            self.emulator.handle_event(Event::Redraw);
++        }
++    }
++
+     pub fn key_down(&mut self, key: String) -> Result<(), JsError> {
+         let date = js_sys::Date::new_0();
+         let millis = date.value_of();
 diff --git a/wie-web/src/ts/app.ts b/wie-web/src/ts/app.ts
-index e8cf0abb..1b731dac 100644
+index e8cf0abb..02bf8a28 100644
 --- a/wie-web/src/ts/app.ts
 +++ b/wie-web/src/ts/app.ts
-@@ -105,22 +105,28 @@ export const runApp = (app: AppMetadata, archive: Uint8Array, fontData: Uint8Arr
+@@ -105,22 +105,45 @@ export const runApp = (app: AppMetadata, archive: Uint8Array, fontData: Uint8Arr
      { signal: abortController.signal },
    );
  
@@ -1163,6 +1188,7 @@ index e8cf0abb..1b731dac 100644
 +  // executor slice per animation frame leaves the guest idle between frames
 +  // and becomes especially slow when a mobile WebView drops to 30 Hz.
 +  const updateChannel = new MessageChannel();
++  let redrawRequest = 0;
 +  updateChannel.port1.onmessage = () => {
      if (!running) {
        return;
@@ -1178,9 +1204,25 @@ index e8cf0abb..1b731dac 100644
    };
 -  requestAnimationFrame(update);
 +  updateChannel.port2.postMessage(undefined);
++
++  // Canvas uploads are much more expensive than guest execution on Android.
++  // Keep the emulator running continuously, but coalesce repeated repaint
++  // requests into one upload per display frame. This avoids flooding the
++  // WebView compositor and removes the periodic hitching that causes uneven
++  // animation even when the guest clock is fast enough.
++  const redraw = () => {
++    if (!running) {
++      return;
++    }
++
++    wieWeb.redraw();
++    redrawRequest = requestAnimationFrame(redraw);
++  };
++  redrawRequest = requestAnimationFrame(redraw);
  
    return () => {
      running = false;
++    cancelAnimationFrame(redrawRequest);
 +    updateChannel.port1.close();
 +    updateChannel.port2.close();
      abortController.abort();
