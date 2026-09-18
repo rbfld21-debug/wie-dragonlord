@@ -1036,6 +1036,19 @@ index 8ee5d7df..8792eeed 100644
          WIPICTableId::Interface5 => {
              if function_id < 64 {
                  Some(gen_stub(5, "stub"))
+diff --git a/wie-web/src/css/style.css b/wie-web/src/css/style.css
+index fee78978..0aea22f9 100644
+--- a/wie-web/src/css/style.css
++++ b/wie-web/src/css/style.css
+@@ -455,6 +455,8 @@ svg {
+   width: 100%;
+   height: 100%;
+   background: var(--card-bg);
++  image-rendering: crisp-edges;
++  image-rendering: pixelated;
+ }
+ 
+ .button-container {
 diff --git a/wie-web/src/ts/app.ts b/wie-web/src/ts/app.ts
 index e8cf0abb..1b731dac 100644
 --- a/wie-web/src/ts/app.ts
