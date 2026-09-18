@@ -4,7 +4,7 @@ use std::{
 };
 
 use test_utils::{TestPlatform, TestPlatformEvent};
-use wie_backend::{Emulator, Event, KeyCode, Options, extract_zip};
+use wie_backend::{AudioCommand, AudioEventData, Emulator, Event, KeyCode, Options, extract_zip};
 use wie_ktf::KtfEmulator;
 use wie_util::{Result, WieError};
 
@@ -47,9 +47,10 @@ fn press(emulator: &mut KtfEmulator, key: KeyCode, held_ticks: usize) -> Result<
 fn main() -> Result<()> {
     let zip_path = env::args().nth(1).ok_or_else(|| WieError::FatalError("usage: dragonlord_verify GAME.zip".into()))?;
     let capture = Arc::new(spin::Mutex::new(Vec::new()));
+    let audio_capture = Arc::new(spin::Mutex::new(Vec::new()));
     let exited = Arc::new(AtomicBool::new(false));
     let exited_for_handler = exited.clone();
-    let platform = Box::new(TestPlatform::with_screen_capture(capture.clone(), move |event| {
+    let platform = Box::new(TestPlatform::with_screen_and_audio_capture(capture.clone(), audio_capture.clone(), move |event| {
         if matches!(event, TestPlatformEvent::Exit) {
             exited_for_handler.store(true, Ordering::SeqCst);
         }
@@ -98,6 +99,30 @@ fn main() -> Result<()> {
         frame_hash(&after_startup),
         exited.load(Ordering::SeqCst)
     );
+    let commands = audio_capture.lock();
+    for command in commands.iter() {
+        if let AudioCommand::Play { handle, sequence, repeat } = command {
+            let mut midi_events = 0usize;
+            let mut wave_events = 0usize;
+            let mut wave_samples = 0usize;
+            let mut peak = 0i16;
+            for event in &sequence.events {
+                match &event.data {
+                    AudioEventData::Midi(_) => midi_events += 1,
+                    AudioEventData::Wave { samples, .. } => {
+                        wave_events += 1;
+                        wave_samples += samples.len();
+                        peak = peak.max(samples.iter().map(|sample| sample.saturating_abs()).max().unwrap_or(0));
+                    }
+                }
+            }
+            println!(
+                "audio handle={handle} repeat={repeat} duration={} midi_events={midi_events} wave_events={wave_events} wave_samples={wave_samples} peak={peak}",
+                sequence.duration
+            );
+        }
+    }
+    drop(commands);
     if exited.load(Ordering::SeqCst) || non_white < 100 || menu_hash == down_hash || down_hash == ok_hash {
         return Err(WieError::FatalError("Dragonlord menu/input verification failed".into()));
     }
