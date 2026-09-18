@@ -13,13 +13,49 @@ index 173f29c0..cc153b58 100644
  [workspace.package]
  version = "0.1.4"
 diff --git a/test-utils/src/platform.rs b/test-utils/src/platform.rs
-index 88ee9255..38bd87b1 100644
+index 88ee9255..9c85a63b 100644
 --- a/test-utils/src/platform.rs
 +++ b/test-utils/src/platform.rs
-@@ -90,6 +90,17 @@ impl TestPlatform {
-             clock: Some(clock),
+@@ -8,7 +8,7 @@ use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+ 
+ use hashbrown::HashMap;
+ use spin::Mutex;
+-use wie_backend::{AudioSink, Database, DatabaseRepository, Filesystem, Font, Instant, Platform, RecordId, Screen, canvas::Image};
++use wie_backend::{AudioCommand, AudioSink, Database, DatabaseRepository, Filesystem, Font, Instant, Platform, RecordId, Screen, canvas::Image};
+ use wie_util::Result;
+ 
+ use crate::filesystem::MemoryFilesystem;
+@@ -46,6 +46,7 @@ pub struct TestPlatform {
+     db: Arc<MemoryDatabaseRepository>,
+     font: Font,
+     clock: Option<TestClock>,
++    audio_capture: Option<Arc<Mutex<Vec<AudioCommand>>>>,
+ }
+ 
+ impl Default for TestPlatform {
+@@ -63,6 +64,7 @@ impl TestPlatform {
+             db: Arc::new(MemoryDatabaseRepository::default()),
+             font: Font::try_from_static(include_bytes!("../../assets/neodgm.ttf")).unwrap(),
+             clock: None,
++            audio_capture: None,
          }
      }
+ 
+@@ -77,6 +79,7 @@ impl TestPlatform {
+             db: Arc::new(MemoryDatabaseRepository::default()),
+             font: Font::try_from_static(include_bytes!("../../assets/neodgm.ttf")).unwrap(),
+             clock: None,
++            audio_capture: None,
+         }
+     }
+ 
+@@ -88,6 +91,35 @@ impl TestPlatform {
+             db: Arc::new(MemoryDatabaseRepository::default()),
+             font: Font::try_from_static(include_bytes!("../../assets/neodgm.ttf")).unwrap(),
+             clock: Some(clock),
++            audio_capture: None,
++        }
++    }
 +
 +    pub fn with_screen_capture(capture: Arc<Mutex<Vec<u32>>>, event_handler: impl Fn(TestPlatformEvent) + Sync + Send + 'static) -> Self {
 +        Self {
@@ -29,12 +65,51 @@ index 88ee9255..38bd87b1 100644
 +            db: Arc::new(MemoryDatabaseRepository::default()),
 +            font: Font::try_from_static(include_bytes!("../../assets/neodgm.ttf")).unwrap(),
 +            clock: None,
++            audio_capture: None,
++        }
++    }
++
++    pub fn with_screen_and_audio_capture(
++        capture: Arc<Mutex<Vec<u32>>>,
++        audio_capture: Arc<Mutex<Vec<AudioCommand>>>,
++        event_handler: impl Fn(TestPlatformEvent) + Sync + Send + 'static,
++    ) -> Self {
++        Self {
++            screen: TestScreen::with_capture(capture),
++            event_handler: Some(Box::new(event_handler)),
++            fs: Arc::new(MemoryFilesystem::default()),
++            db: Arc::new(MemoryDatabaseRepository::default()),
++            font: Font::try_from_static(include_bytes!("../../assets/neodgm.ttf")).unwrap(),
++            clock: None,
++            audio_capture: Some(audio_capture),
+         }
+     }
+ }
+@@ -119,7 +151,7 @@ impl Platform for TestPlatform {
+     }
+ 
+     fn audio_sink(&self) -> Box<dyn AudioSink> {
+-        Box::new(TestAudioSink)
++        Box::new(TestAudioSink(self.audio_capture.clone()))
+     }
+ 
+     fn write_stdout(&self, buf: &[u8]) {
+@@ -223,15 +255,20 @@ impl Database for MemoryDatabase {
+     }
+ }
+ 
+-pub struct TestAudioSink;
++pub struct TestAudioSink(Option<Arc<Mutex<Vec<AudioCommand>>>>);
+ 
+ impl AudioSink for TestAudioSink {
+-    fn send(&self, _command: wie_backend::AudioCommand) {}
++    fn send(&self, command: AudioCommand) {
++        if let Some(capture) = &self.0 {
++            capture.lock().push(command);
 +        }
 +    }
  }
  
- impl Platform for TestPlatform {
-@@ -232,6 +243,7 @@ impl AudioSink for TestAudioSink {
  pub struct TestScreen {
      width: AtomicU32,
      height: AtomicU32,
@@ -42,7 +117,7 @@ index 88ee9255..38bd87b1 100644
  }
  
  impl Default for TestScreen {
-@@ -239,6 +251,17 @@ impl Default for TestScreen {
+@@ -239,6 +276,17 @@ impl Default for TestScreen {
          Self {
              width: AtomicU32::new(320),
              height: AtomicU32::new(240),
@@ -60,7 +135,7 @@ index 88ee9255..38bd87b1 100644
          }
      }
  }
-@@ -255,7 +278,15 @@ impl Screen for TestScreen {
+@@ -255,7 +303,15 @@ impl Screen for TestScreen {
          Ok(())
      }
  
