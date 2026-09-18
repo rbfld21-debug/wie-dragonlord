@@ -4,6 +4,10 @@ on:
   workflow_dispatch:
   push:
     branches: [codex/mc-grp-get-context]
+    paths:
+      - tools/dragonlord_verify.rs
+      - .github/workflows/publish-verifier.yml
+      - patches/MC_grpGetContext-WIE.patch
 
 permissions:
   contents: write
@@ -13,9 +17,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: git clone https://github.com/dlunch/wie.git source
-      - run: git -C source checkout 4924e28a93b0
-      - run: git -C source apply "$GITHUB_WORKSPACE/patches/MC_grpGetContext-WIE.patch"
+      - run: |
+          git clone https://github.com/dlunch/wie.git source
+          git -C source checkout 4924e28a93b0
+          git -C source apply "$GITHUB_WORKSPACE/patches/MC_grpGetContext-WIE.patch"
+          mkdir -p source/wie-ktf/examples
+          cp tools/dragonlord_verify.rs source/wie-ktf/examples/dragonlord_verify.rs
       - uses: dtolnay/rust-toolchain@stable
       - working-directory: source
         run: cargo build --release -p wie-ktf --example dragonlord_verify
