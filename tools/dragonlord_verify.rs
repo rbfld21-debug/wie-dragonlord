@@ -74,10 +74,17 @@ fn main() -> Result<()> {
     press(&mut emulator, KeyCode::DOWN, 2)?;
     let after_down = capture.lock().clone();
     save_ppm("dragonlord-after-down.ppm", &after_down)?;
-    tick(&mut emulator, 396)?;
+    press(&mut emulator, KeyCode::UP, 2)?;
     press(&mut emulator, KeyCode::OK, 2)?;
     let after_ok = capture.lock().clone();
     save_ppm("dragonlord-after-ok.ppm", &after_ok)?;
+    for step in 0..12 {
+        tick(&mut emulator, 2000)?;
+        press(&mut emulator, KeyCode::OK, 2)?;
+        let frame = capture.lock().clone();
+        save_ppm(&format!("dragonlord-story-{step:02}.ppm"), &frame)?;
+        println!("story_step={step} hash={:016x}", frame_hash(&frame));
+    }
     tick(&mut emulator, 5000)?;
     let after_startup = capture.lock().clone();
     save_ppm("dragonlord-after-startup.ppm", &after_startup)?;
