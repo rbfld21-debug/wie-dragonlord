@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     env, fs,
     sync::{Arc, atomic::{AtomicBool, Ordering}},
 };
@@ -110,6 +111,8 @@ fn main() -> Result<()> {
             let mut pitch_bend = 0usize;
             let mut sysex = 0usize;
             let mut percussion = 0usize;
+            let mut program_values = BTreeSet::new();
+            let mut sysex_values = BTreeSet::new();
             let mut wave_events = 0usize;
             let mut wave_samples = 0usize;
             let mut peak = 0i16;
@@ -131,9 +134,15 @@ fn main() -> Result<()> {
                                 }
                             }
                             0xb0 => control_change += 1,
-                            0xc0 => program_change += 1,
+                            0xc0 => {
+                                program_change += 1;
+                                program_values.insert((status & 0x0f, data.get(1).copied().unwrap_or(0)));
+                            }
                             0xe0 => pitch_bend += 1,
-                            0xf0 => sysex += 1,
+                            0xf0 => {
+                                sysex += 1;
+                                sysex_values.insert(data.iter().map(|byte| format!("{byte:02x}")).collect::<Vec<_>>().join(" "));
+                            }
                             _ => {}
                         }
                     }
@@ -148,6 +157,10 @@ fn main() -> Result<()> {
                 "audio handle={handle} repeat={repeat} duration={} midi_events={midi_events} note_on={note_on} note_off={note_off} programs={program_change} controls={control_change} bends={pitch_bend} sysex={sysex} percussion={percussion} wave_events={wave_events} wave_samples={wave_samples} peak={peak}",
                 sequence.duration
             );
+            println!("audio programs={program_values:?}");
+            for value in sysex_values {
+                println!("audio sysex={value}");
+            }
         } else if let AudioCommand::Stop { handle } = command {
             println!("audio stop handle={handle}");
         }
