@@ -393,9 +393,18 @@ index 382d3354..1d469188 100644
  }
  
 diff --git a/wie-core-arm/src/core.rs b/wie-core-arm/src/core.rs
-index db698839..cfd6a531 100644
+index db698839..e84e6c24 100644
 --- a/wie-core-arm/src/core.rs
 +++ b/wie-core-arm/src/core.rs
+@@ -9,7 +9,7 @@ use wie_util::{ByteRead, ByteWrite, Result, WieError, read_generic};
+ use crate::{
+     EmulatedFunction, ResultWriter, ThreadId,
+     context::ArmCoreContext,
+-    engine::{Arm32CpuEngine, ArmEngine, ArmRegister, DebugInner, DebuggedArm32CpuEngine, EngineStopReason, MemoryPermission},
++    engine::{Arm32CpuEngine, ArmEngine, ArmRegister, DebugInner, DebuggedArm32CpuEngine, EngineFastHook, EngineStopReason, MemoryPermission},
+     function::{RegisteredFunction, RegisteredFunctionHolder},
+     thread::ThreadState,
+     thread_wrapper::ArmCoreThreadWrapper,
 @@ -19,7 +19,10 @@ const GLOBAL_DATA_BASE: u32 = 0x7fff0000;
  const FUNCTIONS_BASE: u32 = 0x71000000;
  const FUNCTIONS_SIZE: usize = 0x10000;
