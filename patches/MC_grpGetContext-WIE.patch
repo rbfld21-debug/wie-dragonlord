@@ -161,12 +161,12 @@ index 591e936a..889bd284 100644
    "$schema": "https://schema.tauri.app/config/2",
    "productName": "wie",
 -  "version": "0.1.4",
-+  "version": "0.1.9",
++  "version": "0.1.11",
    "identifier": "net.dlunch.wie",
    "build": {
      "frontendDist": "../wie-web/dist",
 diff --git a/wie-backend/src/canvas.rs b/wie-backend/src/canvas.rs
-index 74584606..f75450ed 100644
+index 74584606..f8667b1b 100644
 --- a/wie-backend/src/canvas.rs
 +++ b/wie-backend/src/canvas.rs
 @@ -623,8 +623,11 @@ where
@@ -183,7 +183,39 @@ index 74584606..f75450ed 100644
  
          let total_width = string.chars().map(|c| font.h_advance(font.scaled_glyph(c).id)).sum::<f32>();
          let x = match text_alignment {
-@@ -941,7 +944,7 @@ pub fn encode_png(image: &dyn Image) -> Result<Vec<u8>> {
+@@ -643,18 +646,27 @@ where
+             let h_advance = font.h_advance(glyph.id);
+ 
+             if let Some(outlined_glyph) = font.outline_glyph(glyph) {
+-                outlined_glyph.draw(|glyph_x: u32, glyph_y, c| {
++                outlined_glyph.draw(|glyph_x: u32, glyph_y, coverage| {
+                     let bounds = outlined_glyph.px_bounds();
+-                    let px = x + (glyph_x as f32 + bounds.min.x + position) as i32;
+-                    let py = y + (glyph_y as f32 + bounds.min.y + size) as i32;
++                    // WIPI supplies the top of the text cell. `px_bounds()` is
++                    // already relative to that origin, so adding the font size
++                    // again pushed every Dragonlord caption down by exactly
++                    // one 10 px line and clipped the second dialogue row.
++                    let px = x + (glyph_x as f32 + bounds.min.x + position).round() as i32;
++                    let py = y + (glyph_y as f32 + bounds.min.y).round() as i32;
+                     if px < clip.x || px >= clip.x + clip.width as i32 || py < clip.y || py >= clip.y + clip.height as i32 {
+                         return;
+                     }
++                    // Match the original handset's monochrome bitmap font and
++                    // keep one-pixel Hangul strokes stable at integer scale.
++                    if coverage < 0.5 {
++                        return;
++                    }
+                     self.blend_pixel(
+                         px,
+                         py,
+                         Color {
+-                            a: (c * 255.0) as u8,
++                            a: 255,
+                             r: color.r,
+                             g: color.g,
+                             b: color.b,
+@@ -941,7 +953,7 @@ pub fn encode_png(image: &dyn Image) -> Result<Vec<u8>> {
  }
  
  pub fn string_width(font: &Font, string: &str, pt_size: f32) -> f32 {
