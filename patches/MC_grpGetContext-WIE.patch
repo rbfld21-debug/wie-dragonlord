@@ -1259,11 +1259,14 @@ index e8cf0abb..02bf8a28 100644
      unsubscribePcmVolume();
      wieWeb.free();
 diff --git a/wie-web/src/ts/midi.ts b/wie-web/src/ts/midi.ts
-index 89569665..99a4b987 100644
+index 89569665..aeddcc0e 100644
 --- a/wie-web/src/ts/midi.ts
 +++ b/wie-web/src/ts/midi.ts
-@@ -23,13 +23,25 @@ let pcmVolume = 0.5;
+@@ -21,15 +21,36 @@ type AudioState = {
+ let midiVolume = 0.5;
+ let pcmVolume = 0.5;
  let audioReady: Promise<AudioState | null> | undefined;
++const midiOutputGain = 6;
  
  async function initAudio(ctx: AudioContext): Promise<AudioState> {
 +  // MIDI and SMAF wave tracks can play at the same time. Connecting both
@@ -1279,9 +1282,18 @@ index 89569665..99a4b987 100644
 +  limiter.connect(ctx.destination);
 +
    const midiGain = ctx.createGain();
-   midiGain.gain.value = midiVolume;
+-  midiGain.gain.value = midiVolume;
 -  midiGain.connect(ctx.destination);
++  midiGain.gain.value = midiVolume * midiOutputGain;
 +  midiGain.connect(limiter);
++
++  // The mobile MIDI sound bank is much quieter and darker than the handset's
++  // SMAF output. Brighten the melodic tracks before the shared peak limiter.
++  const midiTreble = ctx.createBiquadFilter();
++  midiTreble.type = "highshelf";
++  midiTreble.frequency.value = 1600;
++  midiTreble.gain.value = 3;
++  midiTreble.connect(midiGain);
  
    const pcmGain = ctx.createGain();
    pcmGain.gain.value = pcmVolume;
@@ -1290,6 +1302,24 @@ index 89569665..99a4b987 100644
  
    let synth: WorkletSynthesizer | null = null;
    try {
+@@ -38,7 +59,7 @@ async function initAudio(ctx: AudioContext): Promise<AudioState> {
+     const buffer = await fetch("GeneralUser.sf3").then(response => response.arrayBuffer());
+     await synth.soundBankManager.addSoundBank(buffer, "main");
+     await synth.isReady;
+-    synth.connect(midiGain);
++    synth.connect(midiTreble);
+   } catch (error) {
+     console.warn("MIDI output is unavailable:", error);
+   }
+@@ -57,7 +78,7 @@ async function initAudio(ctx: AudioContext): Promise<AudioState> {
+ export function setMasterVolume(value: number): void {
+   midiVolume = value;
+   audioReady?.then(state => {
+-    if (state) state.midiGain.gain.value = value;
++    if (state) state.midiGain.gain.value = value * midiOutputGain;
+   });
+ }
+ 
 diff --git a/wie-wipi-c/src/api.rs b/wie-wipi-c/src/api.rs
 index 3898c17f..e22bfe39 100644
 --- a/wie-wipi-c/src/api.rs
