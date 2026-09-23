@@ -1411,10 +1411,10 @@ index 89569665..a02aaa20 100644
  }
 diff --git a/wie-web/src/ts/smaf-pcm.ts b/wie-web/src/ts/smaf-pcm.ts
 new file mode 100644
-index 00000000..b1255c55
+index 00000000..e99e5b25
 --- /dev/null
 +++ b/wie-web/src/ts/smaf-pcm.ts
-@@ -0,0 +1,114 @@
+@@ -0,0 +1,116 @@
 +// SMAF's MA-5 setup messages contain instrument samples and their voice maps.
 +// Ordinary MIDI sound banks ignore them, changing the timbre of the score.
 +export function decodeYamahaAdpcm(bytes: Uint8Array): Float32Array {
@@ -1494,13 +1494,15 @@ index 00000000..b1255c55
 +    const bufferKey = `${voice.wave}:${voice.sampleRate}`;
 +    let buffer = this.buffers.get(bufferKey);
 +    if (!buffer) {
-+      buffer = this.context.createBuffer(1, samples.length, voice.sampleRate);
++      // AudioBuffer uses the device rate; playbackRate restores the sample's
++      // original rate, including handset rates below a browser's accepted range.
++      buffer = this.context.createBuffer(1, samples.length, this.context.sampleRate);
 +      buffer.getChannelData(0).set(samples);
 +      this.buffers.set(bufferKey, buffer);
 +    }
 +    const source = this.context.createBufferSource();
 +    source.buffer = buffer;
-+    source.playbackRate.value = 2 ** ((note - voice.rootNote) / 12);
++    source.playbackRate.value = voice.sampleRate / this.context.sampleRate * 2 ** ((note - voice.rootNote) / 12);
 +    const gain = this.context.createGain();
 +    gain.gain.value = data[2] / 127;
 +    source.connect(gain);
