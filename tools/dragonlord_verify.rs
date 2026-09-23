@@ -118,6 +118,12 @@ fn main() -> Result<()> {
             let mut peak = 0i16;
             for event in &sequence.events {
                 match &event.data {
+                    AudioEventData::Smaf(data) => {
+                        if let Ok(directory) = env::var("DRAGONLORD_DUMP_SMAF_DIR") {
+                            fs::write(format!("{directory}/audio-{handle}.mmf"), data)
+                                .map_err(|error| WieError::FatalError(error.to_string()))?;
+                        }
+                    }
                     AudioEventData::Midi(data) => {
                         midi_events += 1;
                         let status = data.first().copied().unwrap_or(0);
