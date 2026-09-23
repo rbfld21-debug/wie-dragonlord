@@ -1259,10 +1259,10 @@ index e8cf0abb..02bf8a28 100644
      unsubscribePcmVolume();
      wieWeb.free();
 diff --git a/wie-web/src/ts/midi.ts b/wie-web/src/ts/midi.ts
-index 89569665..aeddcc0e 100644
+index 89569665..4459d190 100644
 --- a/wie-web/src/ts/midi.ts
 +++ b/wie-web/src/ts/midi.ts
-@@ -21,15 +21,36 @@ type AudioState = {
+@@ -21,15 +21,44 @@ type AudioState = {
  let midiVolume = 0.5;
  let pcmVolume = 0.5;
  let audioReady: Promise<AudioState | null> | undefined;
@@ -1293,7 +1293,15 @@ index 89569665..aeddcc0e 100644
 +  midiTreble.type = "highshelf";
 +  midiTreble.frequency.value = 1600;
 +  midiTreble.gain.value = 3;
-+  midiTreble.connect(midiGain);
++  // The GM fallback adds a strong 43 Hz bass component absent from the
++  // handset recording. An 80 Hz cutoff reduces it without removing the
++  // 130–200 Hz melody that the earlier 105 Hz filter also suppressed.
++  const midiBassCut = ctx.createBiquadFilter();
++  midiBassCut.type = "highpass";
++  midiBassCut.frequency.value = 80;
++  midiBassCut.Q.value = Math.SQRT1_2;
++  midiTreble.connect(midiBassCut);
++  midiBassCut.connect(midiGain);
  
    const pcmGain = ctx.createGain();
    pcmGain.gain.value = pcmVolume;
@@ -1302,7 +1310,7 @@ index 89569665..aeddcc0e 100644
  
    let synth: WorkletSynthesizer | null = null;
    try {
-@@ -38,7 +59,7 @@ async function initAudio(ctx: AudioContext): Promise<AudioState> {
+@@ -38,7 +67,7 @@ async function initAudio(ctx: AudioContext): Promise<AudioState> {
      const buffer = await fetch("GeneralUser.sf3").then(response => response.arrayBuffer());
      await synth.soundBankManager.addSoundBank(buffer, "main");
      await synth.isReady;
@@ -1311,7 +1319,7 @@ index 89569665..aeddcc0e 100644
    } catch (error) {
      console.warn("MIDI output is unavailable:", error);
    }
-@@ -57,7 +78,7 @@ async function initAudio(ctx: AudioContext): Promise<AudioState> {
+@@ -57,7 +86,7 @@ async function initAudio(ctx: AudioContext): Promise<AudioState> {
  export function setMasterVolume(value: number): void {
    midiVolume = value;
    audioReady?.then(state => {
