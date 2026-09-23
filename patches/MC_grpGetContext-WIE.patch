@@ -166,24 +166,23 @@ index 591e936a..46c0206f 100644
    "build": {
      "frontendDist": "../wie-web/dist",
 diff --git a/wie-backend/src/canvas.rs b/wie-backend/src/canvas.rs
-index 74584606..5e34df0b 100644
+index 74584606..50226534 100644
 --- a/wie-backend/src/canvas.rs
 +++ b/wie-backend/src/canvas.rs
-@@ -623,8 +623,11 @@ where
+@@ -623,8 +623,10 @@ where
      }
  
      fn draw_text(&mut self, font: &Font, string: &str, x: i32, y: i32, text_alignment: TextAlignment, color: Color, clip: Clip) {
 -        let size = 10.0; // TODO
 -        let font = font.0.as_scaled(font.0.pt_to_px_scale(size).unwrap());
-+        // Mobile APIs specify their bitmap-font size in screen pixels. Treating
-+        // this as typographic points enlarges 10 px text to roughly 13.3 px,
-+        // which makes KTF menu and dialogue lines overlap.
-+        let size = 10.0;
++        // Render Hangul at a readable handset size while keeping the
++        // original game coordinates and line spacing.
++        let size = 12.0;
 +        let font = font.0.as_scaled(size);
  
          let total_width = string.chars().map(|c| font.h_advance(font.scaled_glyph(c).id)).sum::<f32>();
          let x = match text_alignment {
-@@ -643,18 +646,33 @@ where
+@@ -643,18 +645,26 @@ where
              let h_advance = font.h_advance(glyph.id);
  
              if let Some(outlined_glyph) = font.outline_glyph(glyph) {
@@ -193,35 +192,28 @@ index 74584606..5e34df0b 100644
 -                    let px = x + (glyph_x as f32 + bounds.min.x + position) as i32;
 -                    let py = y + (glyph_y as f32 + bounds.min.y + size) as i32;
 +                    // neodgm is a pixel font built on a 16-unit grid. At the
-+                    // 10 px WIPI size its outline lands on fractional pixels.
++                    // handset font size its outline lands on fractional pixels.
 +                    // Snap strokes to the feature-phone pixel grid instead of
 +                    // truncating them into uneven columns.
 +                    let px = x + (glyph_x as f32 + bounds.min.x + position).round() as i32;
-+                    // WIPI passes drawString's y coordinate as the font
-+                    // baseline. Adding the font size here treated it as a
-+                    // top-left coordinate and shifted every dialogue glyph
-+                    // ten pixels down, across the name-box border and beyond
-+                    // the bottom of the dialogue window.
++                    // WIPI supplies a baseline coordinate; adding `size` here
++                    // pushed dialogue text through the box border.
 +                    let py = y + (glyph_y as f32 + bounds.min.y).round() as i32;
                      if px < clip.x || px >= clip.x + clip.width as i32 || py < clip.y || py >= clip.y + clip.height as i32 {
                          return;
                      }
-+                    // The original handset used a monochrome bitmap font.
-+                    // Binary coverage prevents one-pixel Hangul strokes from
-+                    // becoming irregular grey fragments after scaling.
-+                    if coverage < 0.5 {
-+                        return;
-+                    }
++                    // Keep fractional edge coverage so small Hangul strokes
++                    // retain their shape instead of losing entire pixels.
                      self.blend_pixel(
                          px,
                          py,
                          Color {
 -                            a: (c * 255.0) as u8,
-+                            a: 255,
++                            a: (coverage * 255.0) as u8,
                              r: color.r,
                              g: color.g,
                              b: color.b,
-@@ -941,7 +959,7 @@ pub fn encode_png(image: &dyn Image) -> Result<Vec<u8>> {
+@@ -941,7 +951,7 @@ pub fn encode_png(image: &dyn Image) -> Result<Vec<u8>> {
  }
  
  pub fn string_width(font: &Font, string: &str, pt_size: f32) -> f32 {
@@ -1267,24 +1259,10 @@ index e8cf0abb..02bf8a28 100644
      unsubscribePcmVolume();
      wieWeb.free();
 diff --git a/wie-web/src/ts/midi.ts b/wie-web/src/ts/midi.ts
-index 89569665..a02aaa20 100644
+index 89569665..aeddcc0e 100644
 --- a/wie-web/src/ts/midi.ts
 +++ b/wie-web/src/ts/midi.ts
-@@ -1,4 +1,5 @@
- import { WorkletSynthesizer } from "spessasynth_lib";
-+import { SmafPcmPlayer } from "./smaf-pcm";
- 
- type MidiEvent = [time: number, kind: "midi", data: Uint8Array];
- type WaveEvent = [time: number, kind: "wave", channels: number, samplingRate: number, samples: Int16Array];
-@@ -15,21 +16,58 @@ type AudioState = {
-   clockPerformanceTime: number;
-   midiGain: GainNode;
-   pcmGain: GainNode;
-+  smafPcmFilter: BiquadFilterNode;
-   pcmSources: Map<number, Set<AudioBufferSourceNode>>;
-+  smafPlayers: Map<number, SmafPcmPlayer>;
- };
- 
+@@ -21,15 +21,36 @@ type AudioState = {
  let midiVolume = 0.5;
  let pcmVolume = 0.5;
  let audioReady: Promise<AudioState | null> | undefined;
@@ -1315,30 +1293,16 @@ index 89569665..a02aaa20 100644
 +  midiTreble.type = "highshelf";
 +  midiTreble.frequency.value = 1600;
 +  midiTreble.gain.value = 3;
-+  // The General MIDI fallback produces a sustained sub-bass note that is
-+  // nearly absent from the original handset recording. Remove that rumble
-+  // before the limiter so it does not duck the actual melody.
-+  const midiRumbleCut = ctx.createBiquadFilter();
-+  midiRumbleCut.type = "highpass";
-+  midiRumbleCut.frequency.value = 105;
-+  midiRumbleCut.Q.value = Math.SQRT1_2;
-+  midiTreble.connect(midiRumbleCut);
-+  midiRumbleCut.connect(midiGain);
++  midiTreble.connect(midiGain);
  
    const pcmGain = ctx.createGain();
    pcmGain.gain.value = pcmVolume;
 -  pcmGain.connect(ctx.destination);
 +  pcmGain.connect(limiter);
-+
-+  const smafPcmFilter = ctx.createBiquadFilter();
-+  smafPcmFilter.type = "highpass";
-+  smafPcmFilter.frequency.value = 105;
-+  smafPcmFilter.Q.value = Math.SQRT1_2;
-+  smafPcmFilter.connect(pcmGain);
  
    let synth: WorkletSynthesizer | null = null;
    try {
-@@ -38,7 +76,7 @@ async function initAudio(ctx: AudioContext): Promise<AudioState> {
+@@ -38,7 +59,7 @@ async function initAudio(ctx: AudioContext): Promise<AudioState> {
      const buffer = await fetch("GeneralUser.sf3").then(response => response.arrayBuffer());
      await synth.soundBankManager.addSoundBank(buffer, "main");
      await synth.isReady;
@@ -1347,16 +1311,7 @@ index 89569665..a02aaa20 100644
    } catch (error) {
      console.warn("MIDI output is unavailable:", error);
    }
-@@ -50,14 +88,16 @@ async function initAudio(ctx: AudioContext): Promise<AudioState> {
-     clockPerformanceTime: performance.timeOrigin + performance.now(),
-     midiGain,
-     pcmGain,
-+    smafPcmFilter,
-     pcmSources: new Map(),
-+    smafPlayers: new Map(),
-   };
- }
- 
+@@ -57,7 +78,7 @@ async function initAudio(ctx: AudioContext): Promise<AudioState> {
  export function setMasterVolume(value: number): void {
    midiVolume = value;
    audioReady?.then(state => {
@@ -1365,172 +1320,6 @@ index 89569665..a02aaa20 100644
    });
  }
  
-@@ -95,7 +135,14 @@ export class AudioPlayer {
- 
-         if (output.type === "event") {
-           if (output.event[1] === "midi") {
--            state.synth?.sendMessage(output.event[2], 0, { time });
-+            let player = state.smafPlayers.get(output.handle);
-+            if (!player) {
-+              player = new SmafPcmPlayer(state.ctx, state.smafPcmFilter);
-+              state.smafPlayers.set(output.handle, player);
-+            }
-+            if (!player.receive(output.event[2], time)) {
-+              state.synth?.sendMessage(output.event[2], 0, { time });
-+            }
-             return;
-           }
- 
-@@ -129,6 +176,7 @@ export class AudioPlayer {
-         for (const cleanupTime of cleanupTimes) {
-           for (const [channel, note] of output.notes) {
-             state.synth?.sendMessage([0x80 | channel, note, 0], 0, { time: cleanupTime });
-+            state.smafPlayers.get(output.handle)?.release(`${channel}:${note}`, cleanupTime);
-           }
-           for (const channel of output.channels) {
-             state.synth?.sendMessage([0xb0 | channel, 64, 0], 0, { time: cleanupTime });
-@@ -138,6 +186,8 @@ export class AudioPlayer {
-         }
- 
-         if (output.immediate) {
-+          state.smafPlayers.get(output.handle)?.stop(state.ctx.currentTime);
-+          state.smafPlayers.delete(output.handle);
-           for (const source of state.pcmSources.get(output.handle) ?? []) {
-             source.stop(state.ctx.currentTime);
-           }
-@@ -178,6 +228,9 @@ export class AudioPlayer {
-     this.worker.terminate();
-     if (audioReady === this.audioReady) audioReady = undefined;
-     void this.ctx?.close().catch(error => console.warn("Failed to close audio context:", error));
--    void this.audioReady.then(state => state?.synth?.destroy());
-+    void this.audioReady.then(state => {
-+      for (const player of state?.smafPlayers.values() ?? []) player.stop(state!.ctx.currentTime);
-+      state?.synth?.destroy();
-+    });
-   }
- }
-diff --git a/wie-web/src/ts/smaf-pcm.ts b/wie-web/src/ts/smaf-pcm.ts
-new file mode 100644
-index 00000000..e99e5b25
---- /dev/null
-+++ b/wie-web/src/ts/smaf-pcm.ts
-@@ -0,0 +1,116 @@
-+// SMAF's MA-5 setup messages contain instrument samples and their voice maps.
-+// Ordinary MIDI sound banks ignore them, changing the timbre of the score.
-+export function decodeYamahaAdpcm(bytes: Uint8Array): Float32Array {
-+  const result = new Float32Array(bytes.length * 2);
-+  const scale = [230, 230, 230, 230, 307, 409, 512, 614];
-+  let predictor = 0;
-+  let step = 127;
-+  let position = 0;
-+  for (const packed of bytes) {
-+    for (const code of [packed & 15, packed >>> 4]) {
-+      const difference = Math.trunc(step * (2 * (code & 7) + 1) / 8);
-+      predictor = Math.max(-32768, Math.min(32767, predictor + (code & 8 ? -difference : difference)));
-+      result[position++] = predictor / 32768;
-+      step = Math.max(127, Math.min(24567, (step * scale[code & 7]) >> 8));
-+    }
-+  }
-+  return result;
-+}
-+
-+type PcmVoice = { wave: number; sampleRate: number; rootNote: number };
-+type MidiChannel = { bankMsb: number; bankLsb: number; program: number };
-+type ActiveVoice = { source: AudioBufferSourceNode; gain: GainNode };
-+
-+export class SmafPcmPlayer {
-+  private readonly waves = new Map<number, Float32Array>();
-+  private readonly voices = new Map<string, PcmVoice>();
-+  private readonly channels: MidiChannel[] = Array.from({ length: 16 }, () => ({ bankMsb: 0, bankLsb: 0, program: 0 }));
-+  private readonly active = new Map<string, ActiveVoice>();
-+  private readonly buffers = new Map<string, AudioBuffer>();
-+  private readonly context: AudioContext;
-+  private readonly output: AudioNode;
-+
-+  constructor(context: AudioContext, output: AudioNode) {
-+    this.context = context;
-+    this.output = output;
-+  }
-+
-+  // Return true only when an MA-5 sampled voice replaced the MIDI note.
-+  public receive(data: Uint8Array, time: number): boolean {
-+    if (data[0] === 0xf0 && data.length > 9 && data[1] === 0x43 && data[2] === 0x79 && data[3] === 0x07 && data[4] === 0x7f) {
-+      if (data[5] === 0x03 && data.length > 10 && data[data.length - 1] === 0xf7) {
-+        this.waves.set(data[6] & 0x7f, decodeYamahaAdpcm(data.subarray(8, -1)));
-+      } else if (data[5] === 0x01 && data.length >= 28 && data[10] !== 0) {
-+        const sampleRate = (data[11] << 8) | data[12];
-+        if (sampleRate >= 2000 && sampleRate <= 48000) {
-+          this.voices.set(`${data[6]}:${data[7]}:${data[8]}:${data[9]}`, {
-+            wave: data[26] & 0x7f, sampleRate, rootNote: data[9] || 60,
-+          });
-+        }
-+      }
-+      return true;
-+    }
-+
-+    const kind = data[0] & 0xf0;
-+    const channel = data[0] & 15;
-+    const state = this.channels[channel];
-+    if (kind === 0xb0 && data.length >= 3) {
-+      if (data[1] === 0) state.bankMsb = data[2];
-+      if (data[1] === 32) state.bankLsb = data[2];
-+      return false;
-+    }
-+    if (kind === 0xc0 && data.length >= 2) {
-+      state.program = data[1];
-+      return false;
-+    }
-+    if ((kind !== 0x90 && kind !== 0x80) || data.length < 3) return false;
-+
-+    const note = data[1];
-+    const voice = this.voices.get(`${state.bankMsb}:${state.bankLsb}:${state.program}:0`);
-+    if (!voice) return false;
-+    const samples = this.waves.get(voice.wave);
-+    if (!samples) return false;
-+    const key = `${channel}:${note}`;
-+    this.release(key, time);
-+    if (kind === 0x80 || data[2] === 0) return true;
-+
-+    const bufferKey = `${voice.wave}:${voice.sampleRate}`;
-+    let buffer = this.buffers.get(bufferKey);
-+    if (!buffer) {
-+      // AudioBuffer uses the device rate; playbackRate restores the sample's
-+      // original rate, including handset rates below a browser's accepted range.
-+      buffer = this.context.createBuffer(1, samples.length, this.context.sampleRate);
-+      buffer.getChannelData(0).set(samples);
-+      this.buffers.set(bufferKey, buffer);
-+    }
-+    const source = this.context.createBufferSource();
-+    source.buffer = buffer;
-+    source.playbackRate.value = voice.sampleRate / this.context.sampleRate * 2 ** ((note - voice.rootNote) / 12);
-+    const gain = this.context.createGain();
-+    gain.gain.value = data[2] / 127;
-+    source.connect(gain);
-+    gain.connect(this.output);
-+    this.active.set(key, { source, gain });
-+    source.onended = () => {
-+      if (this.active.get(key)?.source === source) this.active.delete(key);
-+      source.disconnect();
-+      gain.disconnect();
-+    };
-+    source.start(time);
-+    return true;
-+  }
-+
-+  public release(key: string, time: number): void {
-+    const active = this.active.get(key);
-+    if (!active) return;
-+    this.active.delete(key);
-+    const at = Math.max(time, this.context.currentTime);
-+    active.gain.gain.setValueAtTime(active.gain.gain.value, at);
-+    active.gain.gain.linearRampToValueAtTime(0, at + 0.015);
-+    try { active.source.stop(at + 0.016); } catch { /* A one-shot sample has already ended. */ }
-+  }
-+
-+  public stop(time: number): void {
-+    for (const key of this.active.keys()) this.release(key, time);
-+  }
-+}
 diff --git a/wie-wipi-c/src/api.rs b/wie-wipi-c/src/api.rs
 index 3898c17f..e22bfe39 100644
 --- a/wie-wipi-c/src/api.rs
