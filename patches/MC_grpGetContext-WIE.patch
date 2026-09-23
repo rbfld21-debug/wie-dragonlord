@@ -165,6 +165,18 @@ index 591e936a..46c0206f 100644
    "identifier": "net.dlunch.wie",
    "build": {
      "frontendDist": "../wie-web/dist",
+diff --git a/wie-backend/src/audio_sink.rs b/wie-backend/src/audio_sink.rs
+index 113f160c..39abf0a5 100644
+--- a/wie-backend/src/audio_sink.rs
++++ b/wie-backend/src/audio_sink.rs
+@@ -29,6 +29,7 @@ pub struct TimedAudioEvent {
+ #[derive(Clone, Debug, PartialEq)]
+ pub enum AudioEventData {
+     Midi(Vec<u8>),
++    Smaf(Vec<u8>),
+     Wave { channels: u8, sampling_rate: u32, samples: Vec<i16> },
+ }
+ 
 diff --git a/wie-backend/src/canvas.rs b/wie-backend/src/canvas.rs
 index 74584606..50226534 100644
 --- a/wie-backend/src/canvas.rs
@@ -223,10 +235,21 @@ index 74584606..50226534 100644
      string.chars().map(|c| font.h_advance(font.scaled_glyph(c).id)).sum::<f32>()
  }
 diff --git a/wie-backend/src/system/audio.rs b/wie-backend/src/system/audio.rs
-index 1a34896b..a2541ade 100644
+index 1a34896b..fe4d5db2 100644
 --- a/wie-backend/src/system/audio.rs
 +++ b/wie-backend/src/system/audio.rs
-@@ -84,7 +84,9 @@ fn convert_smaf_events(events: Vec<(usize, SmafEvent)>) -> AudioSequence {
+@@ -28,7 +28,9 @@ impl Audio {
+ 
+     pub fn load_smaf(&mut self, data: &[u8]) -> Result<AudioHandle, AudioError> {
+         let audio_handle = self.last_audio_handle;
+-        let sequence = Arc::new(convert_smaf_events(parse_smaf(data)));
++        let mut sequence = convert_smaf_events(parse_smaf(data));
++        sequence.events.insert(0, TimedAudioEvent { time: 0, data: AudioEventData::Smaf(data.to_vec()) });
++        let sequence = Arc::new(sequence);
+ 
+         self.last_audio_handle += 1;
+         self.files.insert(audio_handle, sequence);
+@@ -84,7 +86,9 @@ fn convert_smaf_events(events: Vec<(usize, SmafEvent)>) -> AudioSequence {
                  },
                  SmafEvent::MidiNoteOn { channel, note, velocity } => AudioEventData::Midi(vec![0x90 | channel, note, velocity]),
                  SmafEvent::MidiNoteOff { channel, note, velocity } => AudioEventData::Midi(vec![0x80 | channel, note, velocity]),
@@ -237,7 +260,7 @@ index 1a34896b..a2541ade 100644
                  SmafEvent::MidiControlChange { channel, control, value } => AudioEventData::Midi(vec![0xb0 | channel, control, value]),
                  SmafEvent::MidiPitchBend { channel, value } => {
                      AudioEventData::Midi(vec![0xe0 | channel, (value & 0x7f) as u8, ((value >> 7) & 0x7f) as u8])
-@@ -100,6 +102,16 @@ fn convert_smaf_events(events: Vec<(usize, SmafEvent)>) -> AudioSequence {
+@@ -100,6 +104,16 @@ fn convert_smaf_events(events: Vec<(usize, SmafEvent)>) -> AudioSequence {
      AudioSequence { duration, events }
  }
  
@@ -254,7 +277,7 @@ index 1a34896b..a2541ade 100644
  #[cfg(test)]
  mod tests {
      extern crate std;
-@@ -109,11 +121,19 @@ mod tests {
+@@ -109,11 +123,19 @@ mod tests {
  
      use smaf_player::SmafEvent;
  
@@ -1132,6 +1155,21 @@ index fee78978..0aea22f9 100644
  }
  
  .button-container {
+diff --git a/wie-web/src/rust/audio_sink.rs b/wie-web/src/rust/audio_sink.rs
+index f74bf52a..e38947a1 100644
+--- a/wie-web/src/rust/audio_sink.rs
++++ b/wie-web/src/rust/audio_sink.rs
+@@ -52,6 +52,10 @@ impl wie_backend::AudioSink for AudioSink {
+                             value.push(&JsValue::from_str("midi"));
+                             value.push(Uint8Array::from(data.as_slice()).as_ref());
+                         }
++                        AudioEventData::Smaf(data) => {
++                            value.push(&JsValue::from_str("smaf"));
++                            value.push(Uint8Array::from(data.as_slice()).as_ref());
++                        }
+                         AudioEventData::Wave {
+                             channels,
+                             sampling_rate,
 diff --git a/wie-web/src/rust/lib.rs b/wie-web/src/rust/lib.rs
 index 97db875f..02447a9f 100644
 --- a/wie-web/src/rust/lib.rs
@@ -1259,10 +1297,30 @@ index e8cf0abb..02bf8a28 100644
      unsubscribePcmVolume();
      wieWeb.free();
 diff --git a/wie-web/src/ts/midi.ts b/wie-web/src/ts/midi.ts
-index 89569665..4459d190 100644
+index 89569665..3144ea62 100644
 --- a/wie-web/src/ts/midi.ts
 +++ b/wie-web/src/ts/midi.ts
-@@ -21,15 +21,44 @@ type AudioState = {
+@@ -1,8 +1,10 @@
+ import { WorkletSynthesizer } from "spessasynth_lib";
++import { hasCustomInstruments, renderSmaf } from "./smaf-renderer";
+ 
+ type MidiEvent = [time: number, kind: "midi", data: Uint8Array];
++type SmafEvent = [time: number, kind: "smaf", data: Uint8Array];
+ type WaveEvent = [time: number, kind: "wave", channels: number, samplingRate: number, samples: Int16Array];
+-type TransportEvent = MidiEvent | WaveEvent;
++type TransportEvent = MidiEvent | SmafEvent | WaveEvent;
+ 
+ type WorkerOutput =
+   | { type: "event"; handle: number; deadline: number; event: TransportEvent }
+@@ -14,6 +16,7 @@ type AudioState = {
+   clockAudioTime: number;
+   clockPerformanceTime: number;
+   midiGain: GainNode;
++  nativeGain: GainNode;
+   pcmGain: GainNode;
+   pcmSources: Map<number, Set<AudioBufferSourceNode>>;
+ };
+@@ -21,15 +24,53 @@ type AudioState = {
  let midiVolume = 0.5;
  let pcmVolume = 0.5;
  let audioReady: Promise<AudioState | null> | undefined;
@@ -1302,6 +1360,15 @@ index 89569665..4459d190 100644
 +  midiBassCut.Q.value = Math.SQRT1_2;
 +  midiTreble.connect(midiBassCut);
 +  midiBassCut.connect(midiGain);
++
++  const nativeBassCut = ctx.createBiquadFilter();
++  nativeBassCut.type = "highpass";
++  nativeBassCut.frequency.value = 80;
++  nativeBassCut.Q.value = Math.SQRT1_2;
++  const nativeGain = ctx.createGain();
++  nativeGain.gain.value = midiVolume * midiOutputGain;
++  nativeBassCut.connect(nativeGain);
++  nativeGain.connect(limiter);
  
    const pcmGain = ctx.createGain();
    pcmGain.gain.value = pcmVolume;
@@ -1310,7 +1377,7 @@ index 89569665..4459d190 100644
  
    let synth: WorkletSynthesizer | null = null;
    try {
-@@ -38,7 +67,7 @@ async function initAudio(ctx: AudioContext): Promise<AudioState> {
+@@ -38,7 +79,7 @@ async function initAudio(ctx: AudioContext): Promise<AudioState> {
      const buffer = await fetch("GeneralUser.sf3").then(response => response.arrayBuffer());
      await synth.soundBankManager.addSoundBank(buffer, "main");
      await synth.isReady;
@@ -1319,15 +1386,319 @@ index 89569665..4459d190 100644
    } catch (error) {
      console.warn("MIDI output is unavailable:", error);
    }
-@@ -57,7 +86,7 @@ async function initAudio(ctx: AudioContext): Promise<AudioState> {
+@@ -49,6 +90,7 @@ async function initAudio(ctx: AudioContext): Promise<AudioState> {
+     clockAudioTime: ctx.currentTime,
+     clockPerformanceTime: performance.timeOrigin + performance.now(),
+     midiGain,
++    nativeGain,
+     pcmGain,
+     pcmSources: new Map(),
+   };
+@@ -57,7 +99,10 @@ async function initAudio(ctx: AudioContext): Promise<AudioState> {
  export function setMasterVolume(value: number): void {
    midiVolume = value;
    audioReady?.then(state => {
 -    if (state) state.midiGain.gain.value = value;
-+    if (state) state.midiGain.gain.value = value * midiOutputGain;
++    if (state) {
++      state.midiGain.gain.value = value * midiOutputGain;
++      state.nativeGain.gain.value = value * midiOutputGain;
++    }
    });
  }
  
+@@ -82,6 +127,8 @@ export class AudioPlayer {
+       return null;
+     });
+   private commands: Promise<void> = Promise.resolve();
++  private readonly nativeSources = new Map<number, AudioBufferSourceNode>();
++  private readonly generations = new Map<number, number>();
+   private disposed = false;
+ 
+   constructor() {
+@@ -98,6 +145,7 @@ export class AudioPlayer {
+             state.synth?.sendMessage(output.event[2], 0, { time });
+             return;
+           }
++          if (output.event[1] === "smaf") return;
+ 
+           const [, , channels, samplingRate, samples] = output.event;
+           if (channels === 0 || samplingRate === 0) return;
+@@ -147,7 +195,13 @@ export class AudioPlayer {
+   }
+ 
+   public play(handle: number, duration: number, events: TransportEvent[], repeat: boolean): void {
+-    const buffers = events.map(event => (event[1] === "midi" ? event[2].buffer : event[4].buffer));
++    const generation = (this.generations.get(handle) ?? 0) + 1;
++    this.generations.set(handle, generation);
++    const oldSource = this.nativeSources.get(handle);
++    if (oldSource) {
++      oldSource.stop();
++      this.nativeSources.delete(handle);
++    }
+     this.commands = this.commands
+       .then(async () => {
+         const state = await this.audioReady;
+@@ -158,12 +212,43 @@ export class AudioPlayer {
+           state.clockPerformanceTime = performance.timeOrigin + performance.now();
+         }
+         if (this.disposed) return;
+-        this.worker.postMessage({ type: "play", handle, duration, events, repeat }, buffers);
++        if (generation !== this.generations.get(handle)) return;
++        const smaf = events.find((event): event is SmafEvent => event[1] === "smaf");
++        const playable = events.filter((event): event is MidiEvent | WaveEvent => event[1] !== "smaf");
++        if (smaf && hasCustomInstruments(smaf[2]) && state) {
++          this.worker.postMessage({ type: "stop", handle });
++          void renderSmaf(state.ctx, smaf[2], duration)
++            .then(buffer => {
++              if (this.disposed || generation !== this.generations.get(handle)) return;
++              const source = state.ctx.createBufferSource();
++              source.buffer = buffer;
++              source.loop = repeat;
++              source.loopEnd = duration / 1000;
++              source.connect(state.nativeGain);
++              source.onended = () => {
++                if (this.nativeSources.get(handle) === source) this.nativeSources.delete(handle);
++              };
++              this.nativeSources.set(handle, source);
++              source.start();
++            })
++            .catch(error => {
++              console.warn("SMAF instrument renderer unavailable, falling back to MIDI:", error);
++              if (this.disposed || generation !== this.generations.get(handle)) return;
++              const buffers = playable.map(event => (event[1] === "midi" ? event[2].buffer : event[4].buffer));
++              this.worker.postMessage({ type: "play", handle, duration, events: playable, repeat }, buffers);
++            });
++          return;
++        }
++        const buffers = playable.map(event => (event[1] === "midi" ? event[2].buffer : event[4].buffer));
++        this.worker.postMessage({ type: "play", handle, duration, events: playable, repeat }, buffers);
+       })
+       .catch(error => console.warn("Failed to start audio playback:", error));
+   }
+ 
+   public stop(handle: number): void {
++    this.generations.set(handle, (this.generations.get(handle) ?? 0) + 1);
++    this.nativeSources.get(handle)?.stop();
++    this.nativeSources.delete(handle);
+     this.commands = this.commands
+       .then(async () => {
+         await this.audioReady;
+@@ -175,6 +260,8 @@ export class AudioPlayer {
+ 
+   public dispose(): void {
+     this.disposed = true;
++    for (const source of this.nativeSources.values()) source.stop();
++    this.nativeSources.clear();
+     this.worker.terminate();
+     if (audioReady === this.audioReady) audioReady = undefined;
+     void this.ctx?.close().catch(error => console.warn("Failed to close audio context:", error));
+diff --git a/wie-web/src/ts/smaf-pcm.ts b/wie-web/src/ts/smaf-pcm.ts
+new file mode 100644
+index 00000000..2e05ee4c
+--- /dev/null
++++ b/wie-web/src/ts/smaf-pcm.ts
+@@ -0,0 +1,117 @@
++// SMAF's MA-5 setup messages contain instrument samples and their voice maps.
++// Ordinary MIDI sound banks ignore them, changing the timbre of the score.
++export function decodeYamahaAdpcm(bytes: Uint8Array): Float32Array {
++  const result = new Float32Array(bytes.length * 2);
++  const scale = [230, 230, 230, 230, 307, 409, 512, 614];
++  let predictor = 0;
++  let step = 127;
++  let position = 0;
++  for (const packed of bytes) {
++    for (const code of [packed & 15, packed >>> 4]) {
++      const difference = Math.trunc(step * (2 * (code & 7) + 1) / 8);
++      predictor = Math.max(-32768, Math.min(32767, predictor + (code & 8 ? -difference : difference)));
++      result[position++] = predictor / 32768;
++      step = Math.max(127, Math.min(24567, (step * scale[code & 7]) >> 8));
++    }
++  }
++  return result;
++}
++
++type PcmVoice = { wave: number; sampleRate: number; rootNote: number };
++type MidiChannel = { bankMsb: number; bankLsb: number; program: number };
++type ActiveVoice = { source: AudioBufferSourceNode; gain: GainNode };
++
++export class SmafPcmPlayer {
++  private readonly waves = new Map<number, Float32Array>();
++  private readonly voices = new Map<string, PcmVoice>();
++  private readonly channels: MidiChannel[] = Array.from({ length: 16 }, () => ({ bankMsb: 0, bankLsb: 0, program: 0 }));
++  private readonly active = new Map<string, ActiveVoice>();
++  private readonly buffers = new Map<string, AudioBuffer>();
++  private readonly context: AudioContext;
++  private readonly output: AudioNode;
++
++  constructor(context: AudioContext, output: AudioNode) {
++    this.context = context;
++    this.output = output;
++  }
++
++  // Add a quiet MA-5 sample to the GM note. The sample alone omits
++  // important low and middle notes from this phone score.
++  public receive(data: Uint8Array, time: number): boolean {
++    if (data[0] === 0xf0 && data.length > 9 && data[1] === 0x43 && data[2] === 0x79 && data[3] === 0x07 && data[4] === 0x7f) {
++      if (data[5] === 0x03 && data.length > 10 && data[data.length - 1] === 0xf7) {
++        this.waves.set(data[6] & 0x7f, decodeYamahaAdpcm(data.subarray(8, -1)));
++      } else if (data[5] === 0x01 && data.length >= 28 && data[10] !== 0) {
++        const sampleRate = (data[11] << 8) | data[12];
++        if (sampleRate >= 2000 && sampleRate <= 48000) {
++          this.voices.set(`${data[6]}:${data[7]}:${data[8]}:${data[9]}`, {
++            wave: data[26] & 0x7f, sampleRate, rootNote: data[9] || 60,
++          });
++        }
++      }
++      return true;
++    }
++
++    const kind = data[0] & 0xf0;
++    const channel = data[0] & 15;
++    const state = this.channels[channel];
++    if (kind === 0xb0 && data.length >= 3) {
++      if (data[1] === 0) state.bankMsb = data[2];
++      if (data[1] === 32) state.bankLsb = data[2];
++      return false;
++    }
++    if (kind === 0xc0 && data.length >= 2) {
++      state.program = data[1];
++      return false;
++    }
++    if ((kind !== 0x90 && kind !== 0x80) || data.length < 3) return false;
++
++    const note = data[1];
++    const voice = this.voices.get(`${state.bankMsb}:${state.bankLsb}:${state.program}:0`);
++    if (!voice) return false;
++    const samples = this.waves.get(voice.wave);
++    if (!samples) return false;
++    const key = `${channel}:${note}`;
++    this.release(key, time);
++    if (kind === 0x80 || data[2] === 0) return false;
++
++    const bufferKey = `${voice.wave}:${voice.sampleRate}`;
++    let buffer = this.buffers.get(bufferKey);
++    if (!buffer) {
++      // AudioBuffer uses the device rate; playbackRate restores the sample's
++      // original rate, including handset rates below a browser's accepted range.
++      buffer = this.context.createBuffer(1, samples.length, this.context.sampleRate);
++      buffer.getChannelData(0).set(samples);
++      this.buffers.set(bufferKey, buffer);
++    }
++    const source = this.context.createBufferSource();
++    source.buffer = buffer;
++    source.playbackRate.value = voice.sampleRate / this.context.sampleRate * 2 ** ((note - voice.rootNote) / 12);
++    const gain = this.context.createGain();
++    gain.gain.value = (data[2] / 127) * 0.18;
++    source.connect(gain);
++    gain.connect(this.output);
++    this.active.set(key, { source, gain });
++    source.onended = () => {
++      if (this.active.get(key)?.source === source) this.active.delete(key);
++      source.disconnect();
++      gain.disconnect();
++    };
++    source.start(time);
++    return false;
++  }
++
++  public release(key: string, time: number): void {
++    const active = this.active.get(key);
++    if (!active) return;
++    this.active.delete(key);
++    const at = Math.max(time, this.context.currentTime);
++    active.gain.gain.setValueAtTime(active.gain.gain.value, at);
++    active.gain.gain.linearRampToValueAtTime(0, at + 0.015);
++    try { active.source.stop(at + 0.016); } catch { /* A one-shot sample has already ended. */ }
++  }
++
++  public stop(time: number): void {
++    for (const key of this.active.keys()) this.release(key, time);
++  }
++}
+diff --git a/wie-web/src/ts/smaf-renderer.ts b/wie-web/src/ts/smaf-renderer.ts
+new file mode 100644
+index 00000000..9fabc026
+--- /dev/null
++++ b/wie-web/src/ts/smaf-renderer.ts
+@@ -0,0 +1,78 @@
++// SMAF can carry MA-series instruments that the General MIDI sound bank cannot
++// reproduce. Render those songs with a synthesizer that reads their score and
++// instrument definitions together. The module is built from LGPL WildMIDI.
++type Module = {
++  HEAPU8: Uint8Array;
++  HEAP16: Int16Array;
++  _malloc(size: number): number;
++  _free(pointer: number): void;
++  _smaf_init(): number;
++  _smaf_open(pointer: number, size: number): number;
++  _smaf_read(handle: number, pointer: number, size: number): number;
++  _smaf_close(handle: number): void;
++};
++
++const sampleRate = 44100;
++let modulePromise: Promise<Module> | undefined;
++
++function loadModule(): Promise<Module> {
++  modulePromise ??= (async () => {
++    const url = "/smaf-synth.js";
++    const imported = await import(/* webpackIgnore: true */ url);
++    const module = await imported.default({ locateFile: (file: string) => `/${file}` }) as Module;
++    if (module._smaf_init() !== 0) throw new Error("SMAF synthesizer initialization failed");
++    return module;
++  })();
++  return modulePromise;
++}
++
++export function hasCustomInstruments(data: Uint8Array): boolean {
++  // Yamaha MA-series instrument definition in this score. Other SMAF files
++  // stay on the existing, low-latency MIDI transport.
++  for (let i = 0; i + 4 < data.length; i++) {
++    if (data[i] === 0x43 && data[i + 1] === 0x79 && data[i + 2] === 0x07 && data[i + 3] === 0x7f && data[i + 4] === 0x01) return true;
++  }
++  return false;
++}
++
++export async function renderSmaf(context: AudioContext, data: Uint8Array, durationMs: number): Promise<AudioBuffer> {
++  const module = await loadModule();
++  const input = module._malloc(data.length);
++  const chunkSize = 44100 * 4; // one second of 16-bit stereo PCM
++  const chunk = module._malloc(chunkSize);
++  if (!input || !chunk) throw new Error("SMAF synthesizer ran out of memory");
++
++  let handle = 0;
++  try {
++    module.HEAPU8.set(data, input);
++    handle = module._smaf_open(input, data.length);
++    if (!handle) throw new Error("SMAF synthesizer could not open the score");
++
++    // The browser stores PCM at its own sample rate when the buffer is played;
++    // 44.1 kHz here is the rate produced by the synthesizer.
++    const frames = Math.max(1, Math.ceil(durationMs * sampleRate / 1000));
++    const buffer = context.createBuffer(2, frames, sampleRate);
++    const left = buffer.getChannelData(0);
++    const right = buffer.getChannelData(1);
++    let offset = 0;
++    while (offset < frames) {
++      const count = module._smaf_read(handle, chunk, Math.min(chunkSize, (frames - offset) * 4));
++      if (count <= 0) {
++        if (count < 0) throw new Error("SMAF synthesizer failed while rendering");
++        break;
++      }
++      const samples = module.HEAP16.subarray(chunk >> 1, (chunk + count) >> 1);
++      for (let i = 0; i < samples.length; i += 2) {
++        left[offset] = samples[i] / 32768;
++        right[offset++] = samples[i + 1] / 32768;
++      }
++      // Avoid blocking the game's canvas while a long song is decoded.
++      await new Promise<void>(resolve => setTimeout(resolve, 0));
++    }
++    return buffer;
++  } finally {
++    if (handle) module._smaf_close(handle);
++    module._free(input);
++    module._free(chunk);
++  }
++}
 diff --git a/wie-wipi-c/src/api.rs b/wie-wipi-c/src/api.rs
 index 3898c17f..e22bfe39 100644
 --- a/wie-wipi-c/src/api.rs
