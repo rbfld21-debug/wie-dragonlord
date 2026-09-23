@@ -153,7 +153,7 @@ index 88ee9255..9c85a63b 100644
      fn width(&self) -> u32 {
          self.width.load(Ordering::SeqCst)
 diff --git a/wie-app/tauri.conf.json b/wie-app/tauri.conf.json
-index 591e936a..889bd284 100644
+index 591e936a..46c0206f 100644
 --- a/wie-app/tauri.conf.json
 +++ b/wie-app/tauri.conf.json
 @@ -1,7 +1,7 @@
@@ -165,37 +165,24 @@ index 591e936a..889bd284 100644
    "identifier": "net.dlunch.wie",
    "build": {
      "frontendDist": "../wie-web/dist",
-diff --git a/wie-backend/src/audio_sink.rs b/wie-backend/src/audio_sink.rs
-index 113f160c..39abf0a5 100644
---- a/wie-backend/src/audio_sink.rs
-+++ b/wie-backend/src/audio_sink.rs
-@@ -29,6 +29,7 @@ pub struct TimedAudioEvent {
- #[derive(Clone, Debug, PartialEq)]
- pub enum AudioEventData {
-     Midi(Vec<u8>),
-+    Smaf(Vec<u8>),
-     Wave { channels: u8, sampling_rate: u32, samples: Vec<i16> },
- }
- 
 diff --git a/wie-backend/src/canvas.rs b/wie-backend/src/canvas.rs
-index 74584606..177b5903 100644
+index 74584606..50226534 100644
 --- a/wie-backend/src/canvas.rs
 +++ b/wie-backend/src/canvas.rs
-@@ -623,8 +623,11 @@ where
+@@ -623,8 +623,10 @@ where
      }
  
      fn draw_text(&mut self, font: &Font, string: &str, x: i32, y: i32, text_alignment: TextAlignment, color: Color, clip: Clip) {
 -        let size = 10.0; // TODO
 -        let font = font.0.as_scaled(font.0.pt_to_px_scale(size).unwrap());
-+        // The 10 px outline drops distinct Hangul strokes when rasterized on
-+        // the handset grid. Render at 12 px so the letter shapes survive
-+        // nearest-neighbor display scaling.
++        // Render Hangul at a readable handset size while keeping the
++        // original game coordinates and line spacing.
 +        let size = 12.0;
 +        let font = font.0.as_scaled(size);
  
          let total_width = string.chars().map(|c| font.h_advance(font.scaled_glyph(c).id)).sum::<f32>();
          let x = match text_alignment {
-@@ -643,18 +646,30 @@ where
+@@ -643,18 +645,26 @@ where
              let h_advance = font.h_advance(glyph.id);
  
              if let Some(outlined_glyph) = font.outline_glyph(glyph) {
@@ -205,7 +192,7 @@ index 74584606..177b5903 100644
 -                    let px = x + (glyph_x as f32 + bounds.min.x + position) as i32;
 -                    let py = y + (glyph_y as f32 + bounds.min.y + size) as i32;
 +                    // neodgm is a pixel font built on a 16-unit grid. At the
-+                    // 10 px WIPI size its outline lands on fractional pixels.
++                    // handset font size its outline lands on fractional pixels.
 +                    // Snap strokes to the feature-phone pixel grid instead of
 +                    // truncating them into uneven columns.
 +                    let px = x + (glyph_x as f32 + bounds.min.x + position).round() as i32;
@@ -215,22 +202,18 @@ index 74584606..177b5903 100644
                      if px < clip.x || px >= clip.x + clip.width as i32 || py < clip.y || py >= clip.y + clip.height as i32 {
                          return;
                      }
-+                    // The original handset used a monochrome bitmap font.
-+                    // Binary coverage prevents one-pixel Hangul strokes from
-+                    // becoming irregular grey fragments after scaling.
-+                    if coverage < 0.35 {
-+                        return;
-+                    }
++                    // Keep fractional edge coverage so small Hangul strokes
++                    // retain their shape instead of losing entire pixels.
                      self.blend_pixel(
                          px,
                          py,
                          Color {
 -                            a: (c * 255.0) as u8,
-+                            a: 255,
++                            a: (coverage * 255.0) as u8,
                              r: color.r,
                              g: color.g,
                              b: color.b,
-@@ -941,7 +956,7 @@ pub fn encode_png(image: &dyn Image) -> Result<Vec<u8>> {
+@@ -941,7 +951,7 @@ pub fn encode_png(image: &dyn Image) -> Result<Vec<u8>> {
  }
  
  pub fn string_width(font: &Font, string: &str, pt_size: f32) -> f32 {
@@ -240,21 +223,10 @@ index 74584606..177b5903 100644
      string.chars().map(|c| font.h_advance(font.scaled_glyph(c).id)).sum::<f32>()
  }
 diff --git a/wie-backend/src/system/audio.rs b/wie-backend/src/system/audio.rs
-index 1a34896b..fe4d5db2 100644
+index 1a34896b..a2541ade 100644
 --- a/wie-backend/src/system/audio.rs
 +++ b/wie-backend/src/system/audio.rs
-@@ -28,7 +28,9 @@ impl Audio {
- 
-     pub fn load_smaf(&mut self, data: &[u8]) -> Result<AudioHandle, AudioError> {
-         let audio_handle = self.last_audio_handle;
--        let sequence = Arc::new(convert_smaf_events(parse_smaf(data)));
-+        let mut sequence = convert_smaf_events(parse_smaf(data));
-+        sequence.events.insert(0, TimedAudioEvent { time: 0, data: AudioEventData::Smaf(data.to_vec()) });
-+        let sequence = Arc::new(sequence);
- 
-         self.last_audio_handle += 1;
-         self.files.insert(audio_handle, sequence);
-@@ -84,7 +86,9 @@ fn convert_smaf_events(events: Vec<(usize, SmafEvent)>) -> AudioSequence {
+@@ -84,7 +84,9 @@ fn convert_smaf_events(events: Vec<(usize, SmafEvent)>) -> AudioSequence {
                  },
                  SmafEvent::MidiNoteOn { channel, note, velocity } => AudioEventData::Midi(vec![0x90 | channel, note, velocity]),
                  SmafEvent::MidiNoteOff { channel, note, velocity } => AudioEventData::Midi(vec![0x80 | channel, note, velocity]),
@@ -265,7 +237,7 @@ index 1a34896b..fe4d5db2 100644
                  SmafEvent::MidiControlChange { channel, control, value } => AudioEventData::Midi(vec![0xb0 | channel, control, value]),
                  SmafEvent::MidiPitchBend { channel, value } => {
                      AudioEventData::Midi(vec![0xe0 | channel, (value & 0x7f) as u8, ((value >> 7) & 0x7f) as u8])
-@@ -100,6 +104,16 @@ fn convert_smaf_events(events: Vec<(usize, SmafEvent)>) -> AudioSequence {
+@@ -100,6 +102,16 @@ fn convert_smaf_events(events: Vec<(usize, SmafEvent)>) -> AudioSequence {
      AudioSequence { duration, events }
  }
  
@@ -282,7 +254,7 @@ index 1a34896b..fe4d5db2 100644
  #[cfg(test)]
  mod tests {
      extern crate std;
-@@ -109,11 +123,19 @@ mod tests {
+@@ -109,11 +121,19 @@ mod tests {
  
      use smaf_player::SmafEvent;
  
@@ -1286,50 +1258,11 @@ index e8cf0abb..02bf8a28 100644
      abortController.abort();
      unsubscribePcmVolume();
      wieWeb.free();
-diff --git a/wie-web/src/rust/audio_sink.rs b/wie-web/src/rust/audio_sink.rs
-index f74bf52a..0e1ee42e 100644
---- a/wie-web/src/rust/audio_sink.rs
-+++ b/wie-web/src/rust/audio_sink.rs
-@@ -48,6 +48,10 @@ impl wie_backend::AudioSink for AudioSink {
-                     value.push(&JsValue::from_f64(event.time as f64));
- 
-                     match &event.data {
-+                        AudioEventData::Smaf(data) => {
-+                            value.push(&JsValue::from_str("smaf"));
-+                            value.push(Uint8Array::from(data.as_slice()).as_ref());
-+                        }
-                         AudioEventData::Midi(data) => {
-                             value.push(&JsValue::from_str("midi"));
-                             value.push(Uint8Array::from(data.as_slice()).as_ref());
-diff --git a/wie-web/src/ts/audio-worker.ts b/wie-web/src/ts/audio-worker.ts
-index 703b6dea..afccec14 100644
---- a/wie-web/src/ts/audio-worker.ts
-+++ b/wie-web/src/ts/audio-worker.ts
-@@ -1,6 +1,7 @@
- type MidiEvent = [time: number, kind: "midi", data: Uint8Array];
-+type SmafEvent = [time: number, kind: "smaf", data: Uint8Array];
- type WaveEvent = [time: number, kind: "wave", channels: number, samplingRate: number, samples: Int16Array];
--type TransportEvent = MidiEvent | WaveEvent;
-+type TransportEvent = MidiEvent | SmafEvent | WaveEvent;
- 
- type WorkerCommand =
-   | { type: "play"; handle: number; duration: number; events: TransportEvent[]; repeat: boolean }
 diff --git a/wie-web/src/ts/midi.ts b/wie-web/src/ts/midi.ts
-index 89569665..875bd2b0 100644
+index 89569665..aeddcc0e 100644
 --- a/wie-web/src/ts/midi.ts
 +++ b/wie-web/src/ts/midi.ts
-@@ -1,8 +1,9 @@
- import { WorkletSynthesizer } from "spessasynth_lib";
- 
- type MidiEvent = [time: number, kind: "midi", data: Uint8Array];
-+type SmafEvent = [time: number, kind: "smaf", data: Uint8Array];
- type WaveEvent = [time: number, kind: "wave", channels: number, samplingRate: number, samples: Int16Array];
--type TransportEvent = MidiEvent | WaveEvent;
-+type TransportEvent = MidiEvent | SmafEvent | WaveEvent;
- 
- type WorkerOutput =
-   | { type: "event"; handle: number; deadline: number; event: TransportEvent }
-@@ -21,15 +22,36 @@ type AudioState = {
+@@ -21,15 +21,36 @@ type AudioState = {
  let midiVolume = 0.5;
  let pcmVolume = 0.5;
  let audioReady: Promise<AudioState | null> | undefined;
@@ -1369,7 +1302,7 @@ index 89569665..875bd2b0 100644
  
    let synth: WorkletSynthesizer | null = null;
    try {
-@@ -38,7 +60,7 @@ async function initAudio(ctx: AudioContext): Promise<AudioState> {
+@@ -38,7 +59,7 @@ async function initAudio(ctx: AudioContext): Promise<AudioState> {
      const buffer = await fetch("GeneralUser.sf3").then(response => response.arrayBuffer());
      await synth.soundBankManager.addSoundBank(buffer, "main");
      await synth.isReady;
@@ -1378,7 +1311,7 @@ index 89569665..875bd2b0 100644
    } catch (error) {
      console.warn("MIDI output is unavailable:", error);
    }
-@@ -57,7 +79,7 @@ async function initAudio(ctx: AudioContext): Promise<AudioState> {
+@@ -57,7 +78,7 @@ async function initAudio(ctx: AudioContext): Promise<AudioState> {
  export function setMasterVolume(value: number): void {
    midiVolume = value;
    audioReady?.then(state => {
@@ -1387,23 +1320,6 @@ index 89569665..875bd2b0 100644
    });
  }
  
-@@ -94,6 +116,7 @@ export class AudioPlayer {
-         const time = Math.max(state.ctx.currentTime, state.clockAudioTime + (output.deadline - state.clockPerformanceTime) / 1000);
- 
-         if (output.type === "event") {
-+          if (output.event[1] === "smaf") return;
-           if (output.event[1] === "midi") {
-             state.synth?.sendMessage(output.event[2], 0, { time });
-             return;
-@@ -147,7 +170,7 @@ export class AudioPlayer {
-   }
- 
-   public play(handle: number, duration: number, events: TransportEvent[], repeat: boolean): void {
--    const buffers = events.map(event => (event[1] === "midi" ? event[2].buffer : event[4].buffer));
-+    const buffers = events.map(event => (event[1] === "wave" ? event[4].buffer : event[2].buffer));
-     this.commands = this.commands
-       .then(async () => {
-         const state = await this.audioReady;
 diff --git a/wie-wipi-c/src/api.rs b/wie-wipi-c/src/api.rs
 index 3898c17f..e22bfe39 100644
 --- a/wie-wipi-c/src/api.rs
