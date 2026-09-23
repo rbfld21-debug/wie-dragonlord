@@ -175,10 +175,10 @@ index 74584606..177b5903 100644
      fn draw_text(&mut self, font: &Font, string: &str, x: i32, y: i32, text_alignment: TextAlignment, color: Color, clip: Clip) {
 -        let size = 10.0; // TODO
 -        let font = font.0.as_scaled(font.0.pt_to_px_scale(size).unwrap());
-+        // Mobile APIs specify their bitmap-font size in screen pixels. Treating
-+        // this as typographic points enlarges 10 px text to roughly 13.3 px,
-+        // which makes KTF menu and dialogue lines overlap.
-+        let size = 10.0;
++        // The 10 px outline drops distinct Hangul strokes when rasterized on
++        // the handset grid. Render at 12 px so the letter shapes survive
++        // nearest-neighbor display scaling.
++        let size = 12.0;
 +        let font = font.0.as_scaled(size);
  
          let total_width = string.chars().map(|c| font.h_advance(font.scaled_glyph(c).id)).sum::<f32>();
