@@ -29,12 +29,14 @@ jobs:
         run: |
           python3 - <<'PY'
           import json
+          import os
           from pathlib import Path
 
           config_path = Path('source/wie-app/tauri.conf.json')
           config = json.loads(config_path.read_text())
-          config['identifier'] = 'net.dlunch.wie.audiotest'
-          config['productName'] = 'Dragonlord Audio Test'
+          build_number = os.environ['GITHUB_RUN_NUMBER']
+          config['identifier'] = f'net.dlunch.wie.audiotest{build_number}'
+          config['productName'] = f'Dragonlord Audio {build_number}'
           config_path.write_text(json.dumps(config, ensure_ascii=False, indent=2) + '\n')
           PY
 
