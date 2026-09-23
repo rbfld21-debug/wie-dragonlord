@@ -153,7 +153,7 @@ index 88ee9255..9c85a63b 100644
      fn width(&self) -> u32 {
          self.width.load(Ordering::SeqCst)
 diff --git a/wie-app/tauri.conf.json b/wie-app/tauri.conf.json
-index 591e936a..8aee862a 100644
+index 591e936a..889bd284 100644
 --- a/wie-app/tauri.conf.json
 +++ b/wie-app/tauri.conf.json
 @@ -1,7 +1,7 @@
@@ -161,12 +161,12 @@ index 591e936a..8aee862a 100644
    "$schema": "https://schema.tauri.app/config/2",
    "productName": "wie",
 -  "version": "0.1.4",
-+  "version": "0.1.12",
++  "version": "0.1.11",
    "identifier": "net.dlunch.wie",
    "build": {
      "frontendDist": "../wie-web/dist",
 diff --git a/wie-backend/src/canvas.rs b/wie-backend/src/canvas.rs
-index 74584606..f342758f 100644
+index 74584606..177b5903 100644
 --- a/wie-backend/src/canvas.rs
 +++ b/wie-backend/src/canvas.rs
 @@ -623,8 +623,11 @@ where
@@ -183,21 +183,42 @@ index 74584606..f342758f 100644
  
          let total_width = string.chars().map(|c| font.h_advance(font.scaled_glyph(c).id)).sum::<f32>();
          let x = match text_alignment {
-@@ -645,8 +648,12 @@ where
+@@ -643,18 +646,30 @@ where
+             let h_advance = font.h_advance(glyph.id);
+ 
              if let Some(outlined_glyph) = font.outline_glyph(glyph) {
-                 outlined_glyph.draw(|glyph_x: u32, glyph_y, c| {
+-                outlined_glyph.draw(|glyph_x: u32, glyph_y, c| {
++                outlined_glyph.draw(|glyph_x: u32, glyph_y, coverage| {
                      let bounds = outlined_glyph.px_bounds();
-+                    // WIPI supplies the top of the text cell. `px_bounds()` is
-+                    // already relative to that origin, so adding the font size
-+                    // again pushed every Dragonlord caption down by exactly
-+                    // one 10 px line and clipped the second dialogue row.
-                     let px = x + (glyph_x as f32 + bounds.min.x + position) as i32;
+-                    let px = x + (glyph_x as f32 + bounds.min.x + position) as i32;
 -                    let py = y + (glyph_y as f32 + bounds.min.y + size) as i32;
-+                    let py = y + (glyph_y as f32 + bounds.min.y) as i32;
++                    // neodgm is a pixel font built on a 16-unit grid. At the
++                    // 10 px WIPI size its outline lands on fractional pixels.
++                    // Snap strokes to the feature-phone pixel grid instead of
++                    // truncating them into uneven columns.
++                    let px = x + (glyph_x as f32 + bounds.min.x + position).round() as i32;
++                    // WIPI supplies a baseline coordinate; adding `size` here
++                    // pushed dialogue text through the box border.
++                    let py = y + (glyph_y as f32 + bounds.min.y).round() as i32;
                      if px < clip.x || px >= clip.x + clip.width as i32 || py < clip.y || py >= clip.y + clip.height as i32 {
                          return;
                      }
-@@ -941,7 +948,7 @@ pub fn encode_png(image: &dyn Image) -> Result<Vec<u8>> {
++                    // The original handset used a monochrome bitmap font.
++                    // Binary coverage prevents one-pixel Hangul strokes from
++                    // becoming irregular grey fragments after scaling.
++                    if coverage < 0.35 {
++                        return;
++                    }
+                     self.blend_pixel(
+                         px,
+                         py,
+                         Color {
+-                            a: (c * 255.0) as u8,
++                            a: 255,
+                             r: color.r,
+                             g: color.g,
+                             b: color.b,
+@@ -941,7 +956,7 @@ pub fn encode_png(image: &dyn Image) -> Result<Vec<u8>> {
  }
  
  pub fn string_width(font: &Font, string: &str, pt_size: f32) -> f32 {
@@ -1104,18 +1125,10 @@ index 8ee5d7df..8792eeed 100644
              if function_id < 64 {
                  Some(gen_stub(5, "stub"))
 diff --git a/wie-web/src/css/style.css b/wie-web/src/css/style.css
-index fee78978..65b568bc 100644
+index fee78978..0aea22f9 100644
 --- a/wie-web/src/css/style.css
 +++ b/wie-web/src/css/style.css
-@@ -446,7 +446,6 @@ svg {
- .canvas-wrapper {
-   position: relative;
-   width: min(100vw, 480px);
--  aspect-ratio: 3 / 4;
-   background: var(--card-bg);
- }
- 
-@@ -455,6 +454,8 @@ svg {
+@@ -455,6 +455,8 @@ svg {
    width: 100%;
    height: 100%;
    background: var(--card-bg);
@@ -1198,38 +1211,10 @@ index 97db875f..02447a9f 100644
          let date = js_sys::Date::new_0();
          let millis = date.value_of();
 diff --git a/wie-web/src/ts/app.ts b/wie-web/src/ts/app.ts
-index e8cf0abb..d785e0c9 100644
+index e8cf0abb..02bf8a28 100644
 --- a/wie-web/src/ts/app.ts
 +++ b/wie-web/src/ts/app.ts
-@@ -36,6 +36,7 @@ export const runApp = (app: AppMetadata, archive: Uint8Array, fontData: Uint8Arr
-   const playerView = document.getElementById("player-view") as HTMLElement;
-   const playerTitle = document.getElementById("player-title") as HTMLElement;
-   const canvas = document.getElementById("canvas") as HTMLCanvasElement;
-+  const canvasWrapper = canvas.closest(".canvas-wrapper") as HTMLElement;
-   const backToLibrary = document.getElementById("back-to-library") as HTMLButtonElement;
-   const appSettings = document.getElementById("app-settings") as HTMLButtonElement;
- 
-@@ -46,6 +47,19 @@ export const runApp = (app: AppMetadata, archive: Uint8Array, fontData: Uint8Arr
-   const unsubscribePcmVolume = settings.onPcmVolumeChange((volume) => wieWeb.set_pcm_volume(volume));
-   let running = true;
- 
-+  // The KTF title resizes the backing canvas to 176x220. Stretching that
-+  // surface into the old fixed 3:4 player box both changes its aspect ratio
-+  // and produces uneven fractional source pixels on Android. Fit the largest
-+  // whole-number scale instead, preserving every handset pixel exactly.
-+  const fitCanvasToHandsetPixels = () => {
-+    const availableWidth = Math.min(window.innerWidth, 480);
-+    const scale = Math.max(1, Math.floor(availableWidth / canvas.width));
-+    canvasWrapper.style.width = `${canvas.width * scale}px`;
-+    canvasWrapper.style.height = `${canvas.height * scale}px`;
-+  };
-+  fitCanvasToHandsetPixels();
-+  window.addEventListener("resize", fitCanvasToHandsetPixels, { signal: abortController.signal });
-+
-   wieWeb.set_pcm_volume(settings.pcmVolume);
-   playerTitle.textContent = app.title;
-   createIcons({ icons, root: playerView });
-@@ -105,22 +119,45 @@ export const runApp = (app: AppMetadata, archive: Uint8Array, fontData: Uint8Arr
+@@ -105,22 +105,45 @@ export const runApp = (app: AppMetadata, archive: Uint8Array, fontData: Uint8Arr
      { signal: abortController.signal },
    );
  
