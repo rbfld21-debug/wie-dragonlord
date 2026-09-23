@@ -61,6 +61,24 @@ jobs:
         with:
           tool: wasm-pack,tauri-cli
 
+      - name: Set up SMAF synthesizer toolchain
+        uses: mymindstorm/setup-emsdk@v14
+
+      - name: Build MA-series instrument renderer
+        run: |
+          git clone https://github.com/Mindwerks/wildmidi.git "$RUNNER_TEMP/wildmidi"
+          git -C "$RUNNER_TEMP/wildmidi" checkout 58b66625a072f017313f83c9a1a1c050188ec069
+          emcmake cmake -S "$RUNNER_TEMP/wildmidi" -B "$RUNNER_TEMP/wildmidi-build" \
+            -DBUILD_SHARED_LIBS=OFF -DWANT_STATIC=ON -DWANT_PLAYER=OFF -DWANT_SF2=OFF -DWANT_MAFM=ON
+          cmake --build "$RUNNER_TEMP/wildmidi-build" --target libwildmidi-static -j 2
+          emcc -O3 -I"$RUNNER_TEMP/wildmidi/include" audio/smaf-render.c \
+            "$RUNNER_TEMP/wildmidi-build/src/libWildMidi.a" \
+            -o source/wie-web/public/smaf-synth.js \
+            -s MODULARIZE=1 -s EXPORT_ES6=1 -s ENVIRONMENT=web -s ALLOW_MEMORY_GROWTH=1 \
+            -s 'EXPORTED_FUNCTIONS=["_malloc","_free","_smaf_init","_smaf_open","_smaf_read","_smaf_close"]' \
+            -s 'EXPORTED_RUNTIME_METHODS=["HEAPU8","HEAP16"]'
+          cp "$RUNNER_TEMP/wildmidi/docs/license/LGPLv3.txt" source/wie-web/public/WildMIDI-LGPLv3.txt
+
       - name: Build web frontend
         working-directory: source
         run: |
